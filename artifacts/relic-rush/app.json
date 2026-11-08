@@ -1,0 +1,48 @@
+{
+  "expo": {
+    "name": "Dead Run",
+    "slug": "relic-rush",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "icon": "./assets/images/icon.png",
+    "scheme": "relic-rush",
+    "userInterfaceStyle": "automatic",
+    "ios": {
+      "supportsTablet": false
+    },
+    "android": {},
+    "web": {
+      "favicon": "./assets/images/icon.png",
+      "output": "static"
+    },
+    "plugins": [
+      "expo-router",
+      [
+        "expo-sensors",
+        {
+          "motionPermission": "Allow Dead Run to use motion to steer your survivor when you tilt your phone."
+        }
+      ],
+      [
+        "expo-splash-screen",
+        {
+          "image": "./assets/images/icon.png",
+          "backgroundColor": "#091F20",
+          "imageWidth": 180
+        }
+      ],
+      [
+        "expo-audio",
+        {
+          "microphonePermission": false,
+          "recordAudioAndroid": false
+        }
+      ],
+      "expo-asset"
+    ],
+    "experiments": {
+      "typedRoutes": true,
+      "reactCompiler": true
+    }
+  }
+}

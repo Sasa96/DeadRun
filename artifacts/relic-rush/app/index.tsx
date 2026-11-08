@@ -1,0 +1,734 @@
+import React, { useCallback, useEffect, useRef, useState } from 'react';
+import { Animated, AppState, Easing, PanResponder, Platform, Pressable, ScrollView, StyleSheet, Text, View, useWindowDimensions } from 'react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import { Feather, MaterialCommunityIcons } from '@expo/vector-icons';
+import * as Haptics from 'expo-haptics';
+import colors from '@/constants/colors';
+import { RunnerScene, type SceneApi } from '@/components/RunnerScene';
+import { actions, advance, difficulty, stageAt, newSim, requestTurn, setLane, stageInfo, steer, turnInfo, START_SPEED, MAX_SPEED, STAGE_NAMES, type Sim, type Mode, type StageId, type TurnDir } from '@/lib/game';
+import { INTRO_LEN, introCaption, newIntro, skipIntro, stepIntro, type IntroCaption } from '@/lib/intro';
+import { useProgress } from '@/context/ProgressContext';
+import { useTiltControls } from '@/hooks/useTiltControls';
+import { useIntroSound } from '@/hooks/useIntroSound';
+import { useGameAudio, type AudioPrefs } from '@/hooks/useGameAudio';
+
+const T = colors.light;
+type Act = 'left' | 'right' | 'jump' | 'slide';
+type Ctl = 'tilt' | 'touch';
+interface HudTurn { dir: TurnDir; dist: number; open: boolean; armed: -1 | 0 | 1 }
+interface Hud { dist: number; coins: number; speed: number; turn: HudTurn | null; stage: StageId; stageName: string; stageProg: number; next: StageId; toNext: number; tier: number; threat: string }
+function hudOf(s: Sim): Hud {
+  const ti = turnInfo(s);
+  const st = stageInfo(s.dist);
+  const df = difficulty(s.dist);
+  return { tier: df.tier, threat: df.name, stage: st.id, stageName: st.name, stageProg: st.progress, next: st.next, toNext: Math.ceil(st.remaining), dist: Math.floor(s.dist), coins: s.coinsRun, speed: s.speed, turn: s.mode === 'run' && ti.warn ? { dir: ti.dir, dist: Math.max(0, Math.ceil(ti.dist)), open: ti.open, armed: ti.armed } : null };
+}
+
+function haptic(kind: 'light' | 'heavy' | 'success') {
+  if (Platform.OS === 'web') return;
+  try {
+    if (kind === 'success') Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success).catch(() => {});
+    else Haptics.impactAsync(kind === 'heavy' ? Haptics.ImpactFeedbackStyle.Heavy : Haptics.ImpactFeedbackStyle.Light).catch(() => {});
+  } catch {}
+}
+
+const CAUSE: Record<string, string> = {
+  gap: 'The street collapsed into a sinkhole. They reached the edge first.',
+  hurdle: 'You slammed into a concrete barricade. The horde closed the gap.',
+  beam: 'A quarantine gate caught you at chest height. They were right behind.',
+  corner: 'You ran straight into a dead end. Swipe toward the open street before the corner.',
+  wrongway: 'You turned into a blocked wall. The arrows point to the open street.',
+};
+// walker deaths by character kind (see characters.ts / STAGE_KINDS)
+const WALKER_CAUSE: Record<number, string> = {
+  0: 'An infected office worker walked straight into you. Change lanes before they reach you.',
+  1: 'A road worker shambled into your lane. Read the walkers early and slip past.',
+  2: 'A patient in a hospital gown caught you head-on. Dodge sideways; you cannot jump them.',
+  3: 'An infected jogger ran right at you. Sidestep walkers; jumping and sliding will not clear them.',
+  4: 'A shopper lurched into your path. Move to an empty lane before contact.',
+  5: 'A police officer zombie blocked your lane. Sidestep the uniforms in the precinct.',
+  6: 'A patrol officer zombie walked into you. Dodge sideways; there is always an open lane.',
+  7: 'A doctor in a bloody coat caught you in the corridor. Sidestep before contact.',
+  8: 'A nurse zombie collided with you on the ward. Move to the open lane.',
+};
+const STAGE_ICON: Record<StageId, React.ComponentProps<typeof MaterialCommunityIcons>['name']> = { city: 'city-variant-outline', police: 'police-badge-outline', hospital: 'hospital-box-outline' };
+const TONE_COLOR: Record<IntroCaption['tone'], string> = { time: T.mutedForeground, sfx: T.foreground, alert: T.destructive, action: T.primary };
+
+export default function Game() {
+  const insets = useSafeAreaInsets();
+  const { width, height } = useWindowDimensions();
+  const top = Math.max(insets.top, Platform.OS === 'web' ? 67 : 0);
+  const bottom = Math.max(insets.bottom, Platform.OS === 'web' ? 34 : 0);
+  const progress = useProgress();
+  const isWeb = Platform.OS === 'web';
+
+  const simRef = useRef<Sim>(newSim('home'));
+  const sceneRef = useRef<SceneApi | null>(null);
+  const appActiveRef = useRef(AppState.currentState === 'active');
+  const [sceneReady, setSceneReady] = useState(false);
+  const [hud, setHud] = useState<Hud>(() => hudOf(newSim('home')));
+  const [mode, setMode] = useState<Mode>('home');
+  const [help, setHelp] = useState<boolean>(false);
+  const [ctl, setCtl] = useState<Ctl>(isWeb ? 'touch' : 'tilt');
+  const [result, setResult] = useState<{ dist: number; coins: number; best: boolean; cause: string } | null>(null);
+  const introRef = useRef(newIntro());
+  const introSeenRef = useRef(false);
+  const [introOn, setIntroOn] = useState(false);
+  const [introT, setIntroT] = useState(0);
+  const resetClockRef = useRef(false);
+  const introSound = useIntroSound(introOn, introT);
+  const audio = useGameAudio(mode === 'run' && !introOn);
+  const sfxRef = useRef(audio.play); sfxRef.current = audio.play;
+  const stageRef = useRef<StageId>('city');
+  const recordRef = useRef(progress.recordRun);
+  recordRef.current = progress.recordRun;
+
+  const tiltOn = ctl === 'tilt' && (mode === 'home' || mode === 'run' || mode === 'paused');
+  const onLane = useCallback((position: number) => { setLane(simRef.current, position); }, []);
+  const tilt = useTiltControls({ enabled: tiltOn, onLane });
+  const tiltBroken = tilt.status === 'unavailable' || tilt.status === 'denied' || tilt.status === 'error';
+  const usingTilt = ctl === 'tilt' && !tiltBroken && tilt.status === 'ready';
+  const showPad = !usingTilt;
+
+  const fade = useRef(new Animated.Value(1)).current;
+  const pulse = useRef(new Animated.Value(0)).current;
+  useEffect(() => {
+    const loop = Animated.loop(Animated.sequence([
+      Animated.timing(pulse, { toValue: 1, duration: 1300, easing: Easing.inOut(Easing.quad), useNativeDriver: !isWeb }),
+      Animated.timing(pulse, { toValue: 0, duration: 1300, easing: Easing.inOut(Easing.quad), useNativeDriver: !isWeb }),
+    ]));
+    loop.start();
+    return () => loop.stop();
+  }, [pulse, isWeb]);
+
+  const showOverlay = useCallback(() => {
+    fade.setValue(0);
+    Animated.timing(fade, { toValue: 1, duration: 320, easing: Easing.out(Easing.cubic), useNativeDriver: !isWeb }).start();
+  }, [fade, isWeb]);
+
+  // single rAF owner: simulation step + GL render; HUD throttled to ~10Hz
+  useEffect(() => {
+    let raf = 0; let last = 0; let hudAt = 0;
+    const tick = (now: number) => {
+      const elapsed = last && !resetClockRef.current ? Math.max(0, (now - last) / 1000) : 0;
+      resetClockRef.current = false;
+      const dt = Math.min(0.1, elapsed);
+      last = now;
+      if (!appActiveRef.current || !sceneRef.current) {
+        raf = requestAnimationFrame(tick);
+        return;
+      }
+      if (introActiveRef.current) {
+        const ist = introRef.current;
+        if (stepIntro(ist, elapsed)) finishRef.current();
+        else {
+          sceneRef.current.renderIntro(ist.t);
+          if (now - hudAt > 100) { hudAt = now; setIntroT(ist.t); }
+        }
+        raf = requestAnimationFrame(tick);
+        return;
+      }
+      const s = simRef.current;
+      const prev = s.mode;
+      if (s.mode !== 'paused' && s.mode !== 'over') {
+        const ev = advance(s, dt);
+        if (ev.coin) { haptic('light'); sfxRef.current('pickup'); }
+        if (ev.died) { haptic('heavy'); sfxRef.current('hit'); }
+        if (ev.turned) sfxRef.current('turn');
+        if (s.mode === 'run') {
+          const sid = stageAt(s.dist);
+          if (sid !== stageRef.current) { stageRef.current = sid; sfxRef.current('stage'); }
+        }
+      }
+      if (prev === 'dying' && s.mode === 'over') {
+        const dist = Math.floor(s.dist);
+        const best = recordRef.current(dist, s.coinsRun);
+        setResult({ dist, coins: s.coinsRun, best, cause: s.deathCause === 'walker' ? (WALKER_CAUSE[s.deathKind ?? 0] ?? WALKER_CAUSE[0]) : CAUSE[s.deathCause ?? 'gap'] });
+        setMode('over');
+        showOverlay();
+      }
+      if (s.mode === 'run' && now - hudAt > 100) {
+        hudAt = now;
+        setHud(hudOf(s));
+      }
+      if (s.mode !== 'paused') sceneRef.current?.render(s);
+      raf = requestAnimationFrame(tick);
+    };
+    raf = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(raf);
+  }, [showOverlay]);
+
+  const onSceneReady = useCallback((api: SceneApi | null) => {
+    sceneRef.current = api;
+    setSceneReady(!!api);
+    if (!api && simRef.current.mode === 'run') {
+      simRef.current.mode = 'paused';
+      setMode('paused');
+    }
+    if (api) api.render(simRef.current);
+  }, []);
+
+  // horizontal input: corner turn inside a window; lateral nudge only in touch mode and never near a corner
+  const lateralRef = useRef(!usingTilt); lateralRef.current = !usingTilt;
+  const doAction = useCallback((a: Act) => {
+    const s = simRef.current;
+    if (s.mode !== 'run') return;
+    if (a === 'left' || a === 'right') {
+      const r = steer(s, a === 'left' ? -1 : 1, lateralRef.current);
+      if (r === 'turn') { haptic('success'); setHud(hudOf(s)); } else if (r === 'lane') haptic('light');
+      return;
+    }
+    if (actions[a](s)) { haptic('light'); sfxRef.current(a); }
+  }, []);
+  const turnPress = useCallback((dir: TurnDir) => {
+    const s = simRef.current;
+    if (requestTurn(s, dir)) { haptic('success'); setHud(hudOf(s)); }
+  }, []);
+
+  const startRun = useCallback(() => {
+    if (!sceneRef.current) return;
+    simRef.current = newSim('run');
+    stageRef.current = 'city';
+    audio.restartMusic();
+    setHud(hudOf(simRef.current));
+    setResult(null);
+    setHelp(false);
+    setMode('run');
+    haptic('success');
+  }, [audio.restartMusic]);
+  // opening cinematic: first RUN press per app session; retry/restart bypass it
+  const introActiveRef = useRef(false);
+  const finishIntro = useCallback(() => {
+    if (!introActiveRef.current) return;
+    introActiveRef.current = false;
+    sceneRef.current?.endIntro();
+    setIntroOn(false);
+    startRun();
+  }, [startRun]);
+  const finishRef = useRef(finishIntro); finishRef.current = finishIntro;
+  const playIntro = useCallback(() => {
+    if (!sceneRef.current || introActiveRef.current) return;
+    introSeenRef.current = true;
+    introRef.current = newIntro();
+    resetClockRef.current = true;
+    introActiveRef.current = true;
+    setIntroT(0); setHelp(false); setIntroOn(true);
+  }, []);
+  const skip = useCallback(() => { if (skipIntro(introRef.current)) finishIntro(); }, [finishIntro]);
+  const start = useCallback(() => {
+    if (!introSeenRef.current) { audio.restartMusic(); audio.pauseNow(); playIntro(); } else startRun();
+  }, [playIntro, startRun, audio.restartMusic, audio.pauseNow]);
+
+  const pause = useCallback(() => {
+    if (simRef.current.mode !== 'run') return;
+    simRef.current.mode = 'paused';
+    const s = simRef.current;
+    setHud(hudOf(s));
+    setMode('paused');
+    showOverlay();
+  }, [showOverlay]);
+  const resume = useCallback(() => {
+    if (simRef.current.mode !== 'paused') return;
+    simRef.current.mode = 'run';
+    setMode('run');
+  }, []);
+  const home = useCallback(() => {
+    simRef.current = newSim('home');
+    setResult(null);
+    setMode('home');
+    showOverlay();
+  }, [showOverlay]);
+
+  useEffect(() => {
+    const sub = AppState.addEventListener('change', (st) => {
+      appActiveRef.current = st === 'active';
+      resetClockRef.current = true;
+      if (st !== 'active') pause();
+    });
+    return () => sub.remove();
+  }, [pause]);
+
+  const keyRef = useRef({ doAction, pause, resume, start, skip });
+  keyRef.current = { doAction, pause, resume, start, skip };
+  useEffect(() => {
+    if (!isWeb || typeof window === 'undefined') return;
+    const onKey = (e: KeyboardEvent) => {
+      const k = keyRef.current;
+      const m = simRef.current.mode;
+      if (introActiveRef.current) { if (e.key === 'Escape') { e.preventDefault(); k.skip(); } return; }
+      const map: Record<string, Act> = { ArrowLeft: 'left', a: 'left', ArrowRight: 'right', d: 'right', ArrowUp: 'jump', w: 'jump', ' ': 'jump', ArrowDown: 'slide', s: 'slide' };
+      if (map[e.key] && m === 'run') { e.preventDefault(); k.doAction(map[e.key]); return; }
+      if (e.key === 'Escape' || e.key === 'p') { if (m === 'run') k.pause(); else if (m === 'paused') k.resume(); }
+      if (e.key === 'Enter' && (m === 'home' || m === 'over')) k.start();
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [isWeb]);
+
+  // swipe: vertical = jump/slide; horizontal = corner turn (any mode) or touch-mode lateral nudge
+  const fired = useRef(false);
+  const actRef = useRef(doAction); actRef.current = doAction;
+  const pan = useRef(PanResponder.create({
+    onStartShouldSetPanResponder: () => true,
+    onMoveShouldSetPanResponder: () => true,
+    onPanResponderGrant: () => { fired.current = false; },
+    onPanResponderMove: (_e, g) => {
+      if (fired.current) return;
+      const ax = Math.abs(g.dx); const ay = Math.abs(g.dy);
+      if (Math.max(ax, ay) < 22) return;
+      if (ax > ay) { fired.current = true; actRef.current(g.dx < 0 ? 'left' : 'right'); return; }
+      fired.current = true;
+      actRef.current(g.dy < 0 ? 'jump' : 'slide');
+    },
+  })).current;
+
+  const running = mode === 'run';
+  const glow = pulse.interpolate({ inputRange: [0, 1], outputRange: [1, 1.04] });
+  const danger = pulse.interpolate({ inputRange: [0, 1], outputRange: [0.45, 1] });
+
+  const controlPanel = (
+    <ControlPanel ctl={ctl} isWeb={isWeb} status={tilt.status} message={tilt.message} onCalibrate={() => { tilt.calibrate().catch(() => {}); }} onCtl={setCtl} />
+  );
+
+  return (
+    <View style={styles.root}>
+      <RunnerScene width={width} height={height} onReady={onSceneReady} />
+
+      {running && <View style={StyleSheet.absoluteFill} {...pan.panHandlers} testID="swipe-area" />}
+
+      {running && (
+        <View pointerEvents="box-none" style={[StyleSheet.absoluteFill, { paddingTop: top + 8, paddingBottom: bottom + 12 }]}>
+          <View pointerEvents="box-none" style={styles.hud}>
+            <View style={styles.hudCard} pointerEvents="none">
+              <Text style={styles.hudLabel}>DISTANCE</Text>
+              <Text style={styles.hudBig}>{hud.dist}<Text style={styles.hudUnit}> m</Text></Text>
+              <Text style={[styles.threat, hud.tier >= 4 && { color: T.destructive }]} testID="threat">THREAT {hud.tier + 1} · {hud.threat.toUpperCase()}</Text>
+              <View style={styles.speedTrack}><View style={[styles.speedFill, { width: `${Math.min(100, ((hud.speed - START_SPEED) / (MAX_SPEED - START_SPEED)) * 100)}%` }]} /></View>
+            </View>
+            <View style={styles.hudRight}>
+              <View style={styles.coinChip}>
+                <MaterialCommunityIcons name="medical-bag" size={16} color={T.accent} />
+                <Text style={styles.coinText}>{hud.coins}</Text>
+              </View>
+              <Pressable testID="pause" accessibilityLabel="Pause" onPress={pause} hitSlop={12} style={styles.iconBtn}>
+                <Feather name="pause" size={22} color={T.foreground} />
+              </Pressable>
+            </View>
+          </View>
+          <View style={styles.tiltTag} pointerEvents="none">
+            <Animated.View style={[styles.hordeDot, { opacity: danger }]} />
+            <Text style={styles.tiltTagText}>{usingTilt ? (tilt.status === 'ready' ? 'TILT STEERING' : 'TILT ' + tilt.status.toUpperCase()) : 'TOUCH STEERING'}</Text>
+          </View>
+          <StageChip hud={hud} />
+          {hud.turn && <TurnBanner turn={hud.turn} pulse={danger} />}
+          <View style={{ flex: 1 }} pointerEvents="none" />
+          {hud.turn && (
+            <View style={styles.turnRow} pointerEvents="box-none">
+              {([-1, 1] as const).map((dir) => (
+                <Pressable key={dir} testID={`turn-${dir < 0 ? 'left' : 'right'}`} accessibilityLabel={dir < 0 ? 'Turn left at the corner' : 'Turn right at the corner'} onPressIn={() => turnPress(dir)}
+                  style={({ pressed }) => [styles.turnBtn, hud.turn?.dir === dir && styles.turnBtnHint, hud.turn?.armed === dir && styles.turnBtnArmed, pressed && styles.padBtnOn]}>
+                  <Feather name={dir < 0 ? 'corner-up-left' : 'corner-up-right'} size={26} color={hud.turn?.armed === dir ? T.primaryForeground : T.foreground} />
+                  <Text style={[styles.turnBtnText, hud.turn?.armed === dir && { color: T.primaryForeground }]}>{dir < 0 ? 'LEFT' : 'RIGHT'}</Text>
+                </Pressable>
+              ))}
+            </View>
+          )}
+          <View style={styles.pad} pointerEvents="box-none">
+            {(showPad && !hud.turn
+              ? ([['left', 'chevron-left', 'Move left'], ['slide', 'chevrons-down', 'Slide'], ['jump', 'chevrons-up', 'Jump'], ['right', 'chevron-right', 'Move right']] as const)
+              : ([['slide', 'chevrons-down', 'Slide'], ['jump', 'chevrons-up', 'Jump']] as const)
+            ).map(([a, ic, label]) => (
+              <Pressable key={a} testID={`pad-${a}`} accessibilityLabel={label} onPressIn={() => doAction(a)} style={({ pressed }) => [styles.padBtn, pressed && styles.padBtnOn]}>
+                <Feather name={ic} size={26} color={T.foreground} />
+              </Pressable>
+            ))}
+          </View>
+        </View>
+      )}
+
+      {mode === 'home' && !introOn && (
+        <Animated.View style={[StyleSheet.absoluteFill, styles.overlayHome, { paddingTop: top + 12, paddingBottom: bottom + 16, opacity: fade }]}>
+          <ScrollView contentContainerStyle={{ flexGrow: 1 }} showsVerticalScrollIndicator={false}>
+            <View style={styles.brand}>
+              <View style={styles.kickerRow}>
+                <Animated.View style={[styles.hordeDot, { opacity: danger }]} />
+                <Text style={styles.kicker}>SECTOR 9 · QUARANTINE BREACHED</Text>
+              </View>
+              <Text style={styles.title}>DEAD RUN</Text>
+              <Text style={styles.tag}>The sun is going down. They are not.</Text>
+            </View>
+            <View style={{ flex: 1, minHeight: 40 }} />
+            {progress.error && (
+              <Pressable onPress={progress.retry} style={styles.errorBar} testID="persist-error">
+                <Feather name="alert-triangle" size={16} color={T.destructiveForeground} />
+                <Text style={styles.errorText}>{progress.error}</Text>
+              </Pressable>
+            )}
+            <View style={styles.statsRow}>
+              <Stat label="BEST RUN" value={progress.loaded ? `${progress.best} m` : '—'} />
+              <View style={styles.statDivider} />
+              <Stat label="SUPPLIES" value={progress.loaded ? `${progress.totalCoins}` : '—'} />
+              <View style={styles.statDivider} />
+              <Stat label="ESCAPES" value={progress.loaded ? `${progress.runs}` : '—'} />
+            </View>
+            {controlPanel}
+            <SoundPanel prefs={audio.prefs} error={audio.error} onMusic={audio.toggleMusic} onSfx={audio.toggleSfx} onDismiss={audio.dismissError} />
+            <Animated.View style={{ transform: [{ scale: glow }], marginTop: 12 }}>
+              <Pressable testID="start" disabled={!sceneReady} onPress={start} style={({ pressed }) => [styles.cta, pressed && styles.pressed, !sceneReady && { opacity: 0.5 }]}>
+                <Text style={styles.ctaText}>{sceneReady ? 'RUN' : 'LOADING CITY'}</Text>
+                <Feather name="arrow-up-right" size={24} color={T.primaryForeground} />
+              </Pressable>
+            </Animated.View>
+            <Pressable testID="help" onPress={() => setHelp(true)} style={({ pressed }) => [styles.ghost, pressed && styles.pressed]}>
+              <Feather name="book-open" size={18} color={T.accent} />
+              <Text style={styles.ghostText}>Survival briefing</Text>
+            </Pressable>
+            {introSeenRef.current && (
+              <Pressable testID="replay-intro" onPress={playIntro} disabled={!sceneReady} style={({ pressed }) => [styles.ghost, pressed && styles.pressed]}>
+                <Feather name="film" size={18} color={T.accent} />
+                <Text style={styles.ghostText}>Replay the night it started</Text>
+              </Pressable>
+            )}
+          </ScrollView>
+        </Animated.View>
+      )}
+
+      {introOn && <IntroOverlay t={introT} top={top} bottom={bottom} onSkip={skip} muted={introSound.muted} audioError={introSound.error} onMute={introSound.toggle} />}
+
+      {mode === 'paused' && (
+        <Animated.View style={[StyleSheet.absoluteFill, styles.scrim, { opacity: fade, paddingTop: top, paddingBottom: bottom }]}>
+          <ScrollView contentContainerStyle={styles.scrollCenter} showsVerticalScrollIndicator={false}>
+            <View style={styles.panel}>
+              <Text style={styles.kicker}>HOLD YOUR BREATH</Text>
+              <Text style={styles.panelTitle}>Paused</Text>
+              <Text style={styles.panelSub}>{hud.dist} m out  ·  {hud.coins} supplies</Text>
+              {controlPanel}
+              <SoundPanel prefs={audio.prefs} error={audio.error} onMusic={audio.toggleMusic} onSfx={audio.toggleSfx} onDismiss={audio.dismissError} />
+              <Pressable testID="resume" onPress={resume} style={({ pressed }) => [styles.cta, pressed && styles.pressed]}>
+                <Feather name="play" size={22} color={T.primaryForeground} />
+                <Text style={styles.ctaText}>RESUME</Text>
+              </Pressable>
+              <View style={styles.rowBtns}>
+                <Pressable testID="restart" onPress={startRun} style={({ pressed }) => [styles.ghost, pressed && styles.pressed]}>
+                  <Feather name="rotate-ccw" size={18} color={T.accent} /><Text style={styles.ghostText}>Restart</Text>
+                </Pressable>
+                <Pressable testID="pause-home" onPress={home} style={({ pressed }) => [styles.ghost, pressed && styles.pressed]}>
+                  <Feather name="home" size={18} color={T.accent} /><Text style={styles.ghostText}>Safehouse</Text>
+                </Pressable>
+              </View>
+            </View>
+          </ScrollView>
+        </Animated.View>
+      )}
+
+      {mode === 'over' && result && (
+        <Animated.View style={[StyleSheet.absoluteFill, styles.scrim, { opacity: fade, paddingTop: top, paddingBottom: bottom }]}>
+          <ScrollView contentContainerStyle={styles.scrollCenter} showsVerticalScrollIndicator={false}>
+            <View style={styles.panel}>
+              <Text style={[styles.kicker, { color: T.destructive }]}>CAUGHT</Text>
+              <Text style={styles.panelSub}>{result.cause}</Text>
+              <Text style={styles.resultBig}>{result.dist}<Text style={styles.hudUnit}> m</Text></Text>
+              {result.best ? (
+                <View style={styles.badge}><Feather name="award" size={14} color={T.accentForeground} /><Text style={styles.badgeText}>FURTHEST YET</Text></View>
+              ) : (
+                <Text style={styles.panelSub}>Best {progress.best} m</Text>
+              )}
+              <View style={styles.statsRow}>
+                <Stat label="SUPPLIES THIS RUN" value={`+${result.coins}`} />
+                <View style={styles.statDivider} />
+                <Stat label="STOCKPILE" value={`${progress.totalCoins}`} />
+              </View>
+              {progress.error && (
+                <Pressable onPress={progress.dismissError} style={styles.errorBar}>
+                  <Feather name="alert-triangle" size={16} color={T.destructiveForeground} />
+                  <Text style={styles.errorText}>{progress.error}</Text>
+                </Pressable>
+              )}
+              <Pressable testID="retry" onPress={startRun} style={({ pressed }) => [styles.cta, pressed && styles.pressed]}>
+                <Feather name="rotate-ccw" size={22} color={T.primaryForeground} />
+                <Text style={styles.ctaText}>RUN AGAIN</Text>
+              </Pressable>
+              <Pressable testID="over-home" onPress={home} style={({ pressed }) => [styles.ghost, pressed && styles.pressed]}>
+                <Feather name="home" size={18} color={T.accent} /><Text style={styles.ghostText}>Back to the safehouse</Text>
+              </Pressable>
+            </View>
+          </ScrollView>
+        </Animated.View>
+      )}
+
+      {help && (
+        <View style={[StyleSheet.absoluteFill, styles.scrim, { paddingTop: top, paddingBottom: bottom }]}>
+          <View style={[styles.panel, { maxHeight: height - top - bottom - 24 }]}>
+            <ScrollView contentContainerStyle={{ gap: 14 }} showsVerticalScrollIndicator={false}>
+              <Text style={styles.kicker}>SURVIVAL BRIEFING</Text>
+              <Text style={styles.panelTitle}>Keep moving</Text>
+              <Text style={styles.panelSub}>The infected never stop. Read the street, not the crowd behind you.</Text>
+              <HelpRow icon="smartphone" title="Smooth tilt steering" body="A small tilt moves you partway across the road. Lean further to move further. Return to your calibrated neutral position to center." />
+              <HelpRow icon="crosshair" title="Calibrate first" body="Hold the phone the way you will play, neutral and still, then tap Calibrate. It takes about half a second." />
+              <HelpRow icon="corner-up-right" title="Turn at corners" body="Streets end in dead ends. Arrows, roadside signs and a countdown show which way the open street goes. Swipe that way, tap the turn button, or press the arrow key as you reach the corner. The faster you run, the earlier it accepts your turn. Tilt never turns you; it only moves you across the street." />
+              <HelpRow icon="users" title="Infected walk at you" body="Some infected come straight down a lane toward you. They never swerve. You cannot jump or slide past them, so move to an empty lane. There is always one open." />
+              <HelpRow icon="map" title="Three zones, then repeat" body="Every 900 m the route changes: ruined city streets, then the Precinct 9 police station, then St. Agnes Hospital, then back outside. Uniformed officers patrol the precinct; doctors and nurses roam the wards. Your distance and speed carry through." />
+              <HelpRow icon="arrow-up" title="Swipe up or tap Jump" body="Clear sinkholes and concrete barricades." />
+              <HelpRow icon="arrow-down" title="Swipe down or tap Slide" body="Duck under quarantine gates. Mid-air, it drops you fast." />
+              <HelpRow icon="package" title="Grab supplies" body="Glowing med canisters add to your stockpile. Arcs of them hint at a jump." />
+              <HelpRow icon="command" title="No tilt?" body="Switch to Touch for lane buttons and sideways swipes (away from corners). On web: arrow keys or WASD, Space to jump, P to pause, Enter to start." />
+              <Pressable testID="help-close" onPress={() => setHelp(false)} style={({ pressed }) => [styles.cta, pressed && styles.pressed]}>
+                <Feather name="check" size={22} color={T.primaryForeground} />
+                <Text style={styles.ctaText}>UNDERSTOOD</Text>
+              </Pressable>
+            </ScrollView>
+          </View>
+        </View>
+      )}
+    </View>
+  );
+}
+
+const STATUS_LABEL: Record<string, string> = {
+  idle: 'Waking sensor', ready: 'Tilt ready', calibrating: 'Calibrating', unavailable: 'No motion sensor', denied: 'Motion access denied', error: 'Sensor error',
+};
+
+function ControlPanel({ ctl, isWeb, status, message, onCalibrate, onCtl }: {
+  ctl: Ctl; isWeb: boolean; status: string; message: string; onCalibrate: () => void; onCtl: (c: Ctl) => void;
+}) {
+  const ok = status === 'ready';
+  const bad = status === 'unavailable' || status === 'denied' || status === 'error';
+  return (
+    <View style={styles.ctlCard}>
+      <View style={styles.seg}>
+        {(['tilt', 'touch'] as const).map((c) => {
+          const disabled = c === 'tilt' && isWeb;
+          const on = ctl === c;
+          return (
+            <Pressable key={c} testID={`ctl-${c}`} disabled={disabled} accessibilityState={{ selected: on, disabled }} onPress={() => onCtl(c)} style={[styles.segBtn, on && styles.segOn, disabled && { opacity: 0.4 }]}>
+              <MaterialCommunityIcons name={c === 'tilt' ? 'phone-rotate-landscape' : 'gesture-tap-button'} size={16} color={on ? T.primaryForeground : T.foreground} />
+              <Text style={[styles.segText, on && { color: T.primaryForeground }]}>{c === 'tilt' ? 'Tilt' : 'Touch'}</Text>
+            </Pressable>
+          );
+        })}
+      </View>
+      {ctl === 'tilt' && !isWeb ? (
+        <View style={styles.ctlRow}>
+          <View style={[styles.statusDot, { backgroundColor: ok ? T.accent : bad ? T.destructive : T.primary }]} />
+          <View style={{ flex: 1 }}>
+            <Text style={styles.ctlTitle}>{STATUS_LABEL[status] ?? status}</Text>
+            {!!message && <Text style={styles.ctlBody} numberOfLines={3}>{message}</Text>}
+          </View>
+          <Pressable testID="calibrate" onPress={onCalibrate} disabled={status === 'calibrating' || status === 'unavailable'} style={({ pressed }) => [styles.calBtn, pressed && styles.pressed, (status === 'calibrating' || status === 'unavailable') && { opacity: 0.5 }]}>
+            <Feather name="crosshair" size={15} color={T.accent} />
+            <Text style={styles.calText}>{status === 'denied' ? 'Allow' : 'Calibrate'}</Text>
+          </Pressable>
+        </View>
+      ) : (
+        <Text style={styles.ctlBody}>
+          {isWeb ? 'Tilt steering needs the mobile app. Here: arrow keys or WASD, swipes, or the on-screen lane buttons.' : 'Lane buttons and sideways swipes steer. Swipe up or down to jump and slide.'}
+        </Text>
+      )}
+    </View>
+  );
+}
+
+function SoundPanel({ prefs, error, onMusic, onSfx, onDismiss }: { prefs: AudioPrefs; error: string | null; onMusic: () => void; onSfx: () => void; onDismiss: () => void }) {
+  const items = [
+    { k: 'music', on: prefs.music, label: 'Music', icon: prefs.music ? 'music' : 'music-off', act: onMusic },
+    { k: 'sfx', on: prefs.sfx, label: 'Effects', icon: prefs.sfx ? 'volume-high' : 'volume-off', act: onSfx },
+  ] as const;
+  return (
+    <View style={{ gap: 8, marginTop: 10 }}>
+      <View style={styles.seg}>
+        {items.map((it) => (
+          <Pressable key={it.k} testID={`sound-${it.k}`} accessibilityRole="switch" accessibilityState={{ checked: it.on }}
+            accessibilityLabel={`${it.label} ${it.on ? 'on' : 'off'}. Tap to ${it.on ? 'mute' : 'unmute'}.`}
+            onPress={it.act} style={[styles.segBtn, it.on && styles.segOn]}>
+            <MaterialCommunityIcons name={it.icon} size={16} color={it.on ? T.primaryForeground : T.mutedForeground} />
+            <Text style={[styles.segText, it.on ? { color: T.primaryForeground } : { color: T.mutedForeground }]}>{it.label} {it.on ? 'on' : 'off'}</Text>
+          </Pressable>
+        ))}
+      </View>
+      {error && (
+        <Pressable testID="audio-error" onPress={onDismiss} accessibilityLabel={`${error} Tap to dismiss.`} style={styles.errorBar}>
+          <Feather name="volume-x" size={16} color={T.destructiveForeground} />
+          <Text style={styles.errorText}>{error}</Text>
+        </Pressable>
+      )}
+    </View>
+  );
+}
+
+function StageChip({ hud }: { hud: Hud }) {
+  const fresh = hud.stageProg < 0.05 && hud.dist > 10;
+  return (
+    <View style={styles.stageWrap} pointerEvents="none" testID="stage-chip">
+      <View style={[styles.stageChip, fresh && styles.stageChipFresh]}>
+        <MaterialCommunityIcons name={STAGE_ICON[hud.stage]} size={16} color={fresh ? T.primaryForeground : T.accent} />
+        <View style={{ gap: 3 }}>
+          <Text style={[styles.stageName, fresh && { color: T.primaryForeground }]}>{fresh ? `ENTERING ${hud.stageName.toUpperCase()}` : hud.stageName.toUpperCase()}</Text>
+          <View style={styles.stageTrack}><View style={[styles.stageFill, { width: `${Math.round(hud.stageProg * 100)}%` }]} /></View>
+          <Text style={[styles.stageSub, fresh && { color: T.primaryForeground }]}>{hud.toNext} m to {STAGE_NAMES[hud.next]}</Text>
+        </View>
+      </View>
+    </View>
+  );
+}
+
+function IntroOverlay({ t, top, bottom, onSkip, muted, audioError, onMute }: { t: number; top: number; bottom: number; onSkip: () => void; muted: boolean; audioError: boolean; onMute: () => void }) {
+  const cap = introCaption(t);
+  const left = Math.max(0, Math.ceil(INTRO_LEN - t));
+  const fadeIn = Math.max(0, 1 - t / 0.6);
+  const fadeOut = Math.max(0, (t - (INTRO_LEN - 0.5)) / 0.5);
+  return (
+    <View style={StyleSheet.absoluteFill} testID="intro">
+      <View pointerEvents="none" style={[StyleSheet.absoluteFill, { backgroundColor: T.background, opacity: Math.max(fadeIn, fadeOut) }]} />
+      <View pointerEvents="none" style={[styles.letterbox, { top: 0, height: top + 34 }]} />
+      <View pointerEvents="none" style={[styles.letterbox, { bottom: 0, height: bottom + 54 }]} />
+      <View style={[styles.introTop, { top: top + 6 }]} pointerEvents="box-none">
+        <Text style={styles.introKicker}>THE NIGHT IT STARTED</Text>
+        <Pressable accessibilityLabel={muted ? 'Unmute intro' : 'Mute intro'} onPress={onMute} hitSlop={10}>
+          <Feather name={muted || audioError ? 'volume-x' : 'volume-2'} size={18} color={T.foreground} />
+        </Pressable>
+        <Pressable testID="intro-skip" accessibilityLabel="Skip intro" onPress={onSkip} hitSlop={10} style={({ pressed }) => [styles.skipBtn, pressed && styles.pressed]}>
+          <Text style={styles.skipText}>SKIP  {left}</Text>
+          <Feather name="skip-forward" size={14} color={T.foreground} />
+        </Pressable>
+      </View>
+      {audioError && <Text style={{ position: 'absolute', top: top + 40, left: 16, color: T.mutedForeground, fontSize: 11 }}>Audio unavailable — captions remain on.</Text>}
+      {cap && (
+        <View pointerEvents="none" style={[styles.captionWrap, { bottom: bottom + 70 }]}>
+          <Text testID="intro-caption" style={[styles.caption, { color: TONE_COLOR[cap.tone] }, cap.tone === 'alert' && styles.captionAlert, cap.tone === 'sfx' && styles.captionSfx]}>{cap.text}</Text>
+        </View>
+      )}
+    </View>
+  );
+}
+
+function TurnBanner({ turn, pulse }: { turn: HudTurn; pulse: Animated.AnimatedInterpolation<number> }) {
+  const left = turn.dir < 0;
+  const armedOk = turn.armed === turn.dir;
+  const label = armedOk ? 'TURN LOCKED' : turn.open ? 'TURN NOW' : `${left ? 'LEFT' : 'RIGHT'} TURN`;
+  return (
+    <View style={styles.turnWrap} pointerEvents="none" testID="turn-banner">
+      <Animated.View style={[styles.turnCard, turn.open && !armedOk && styles.turnCardOpen, armedOk && styles.turnCardArmed, turn.open && !armedOk ? { opacity: pulse } : null]}>
+        <Feather name={left ? 'corner-up-left' : 'corner-up-right'} size={30} color={armedOk || turn.open ? T.primaryForeground : T.primary} />
+        <View>
+          <Text style={[styles.turnLabel, (armedOk || turn.open) && { color: T.primaryForeground }]}>{label}</Text>
+          <Text style={[styles.turnSub, (armedOk || turn.open) && { color: T.primaryForeground }]}>{armedOk ? 'Hold your line' : `${turn.dist} m · swipe ${left ? 'left' : 'right'}`}</Text>
+        </View>
+      </Animated.View>
+    </View>
+  );
+}
+
+function Stat({ label, value }: { label: string; value: string }) {
+  return (
+    <View style={styles.stat}>
+      <Text style={styles.statValue}>{value}</Text>
+      <Text style={styles.statLabel}>{label}</Text>
+    </View>
+  );
+}
+
+function HelpRow({ icon, title, body }: { icon: React.ComponentProps<typeof Feather>['name']; title: string; body: string }) {
+  return (
+    <View style={styles.helpRow}>
+      <View style={styles.helpIcon}><Feather name={icon} size={18} color={T.primary} /></View>
+      <View style={{ flex: 1 }}>
+        <Text style={styles.helpTitle}>{title}</Text>
+        <Text style={styles.helpBody}>{body}</Text>
+      </View>
+    </View>
+  );
+}
+
+const F = { r: 'Inter_400Regular', m: 'Inter_500Medium', s: 'Inter_600SemiBold', b: 'Inter_700Bold' };
+
+const styles = StyleSheet.create({
+  threat: { fontSize: 10, letterSpacing: 1.2, fontWeight: '800', color: T.accent, marginTop: 2 },
+  root: { flex: 1, backgroundColor: T.background, overflow: 'hidden' },
+  hud: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-start', paddingHorizontal: 16 },
+  hudCard: { backgroundColor: T.glass, paddingHorizontal: 14, paddingVertical: 8, borderRadius: colors.radius, borderLeftWidth: 3, borderLeftColor: T.primary },
+  hudLabel: { fontFamily: F.s, fontSize: 10, letterSpacing: 2.5, color: T.mutedForeground },
+  hudBig: { fontFamily: F.b, fontSize: 36, color: T.foreground, letterSpacing: -1, fontVariant: ['tabular-nums'] },
+  hudUnit: { fontFamily: F.m, fontSize: 16, color: T.mutedForeground },
+  speedTrack: { width: 110, height: 3, backgroundColor: T.border, borderRadius: 2, overflow: 'hidden', marginTop: 4 },
+  speedFill: { height: 3, backgroundColor: T.destructive },
+  hudRight: { flexDirection: 'row', alignItems: 'center', gap: 12 },
+  coinChip: { flexDirection: 'row', alignItems: 'center', gap: 7, paddingHorizontal: 12, paddingVertical: 7, borderRadius: 99, backgroundColor: T.glass, borderWidth: 1, borderColor: T.border },
+  coinText: { fontFamily: F.b, fontSize: 16, color: T.accent, fontVariant: ['tabular-nums'] },
+  iconBtn: { padding: 6 },
+  tiltTag: { flexDirection: 'row', alignItems: 'center', gap: 6, alignSelf: 'flex-start', marginLeft: 18, marginTop: 8 },
+  tiltTagText: { fontFamily: F.s, fontSize: 10, letterSpacing: 2, color: T.mutedForeground },
+  hordeDot: { width: 7, height: 7, borderRadius: 4, backgroundColor: T.destructive },
+  pad: { flexDirection: 'row', justifyContent: 'center', gap: 12, paddingHorizontal: 16 },
+  padBtn: { width: 70, height: 60, borderRadius: colors.radius, backgroundColor: T.glass, borderWidth: 1, borderColor: T.border, alignItems: 'center', justifyContent: 'center' },
+  stageWrap: { alignItems: 'flex-start', marginLeft: 16, marginTop: 8 },
+  stageChip: { flexDirection: 'row', alignItems: 'center', gap: 8, paddingHorizontal: 10, paddingVertical: 6, borderRadius: colors.radius, backgroundColor: T.glass, borderWidth: 1, borderColor: T.border },
+  stageChipFresh: { backgroundColor: T.primary, borderColor: T.primary },
+  stageName: { fontFamily: 'Inter_700Bold', fontSize: 11, letterSpacing: 1.6, color: T.foreground },
+  stageSub: { fontFamily: 'Inter_500Medium', fontSize: 10, color: T.mutedForeground, fontVariant: ['tabular-nums'] },
+  stageTrack: { width: 130, height: 3, borderRadius: 2, backgroundColor: T.border, overflow: 'hidden' },
+  stageFill: { height: 3, backgroundColor: T.accent },
+  letterbox: { position: 'absolute', left: 0, right: 0, backgroundColor: T.scrim },
+  introTop: { position: 'absolute', left: 16, right: 16, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
+  introKicker: { fontFamily: 'Inter_600SemiBold', fontSize: 10, letterSpacing: 3, color: T.mutedForeground },
+  skipBtn: { flexDirection: 'row', alignItems: 'center', gap: 6, paddingHorizontal: 14, paddingVertical: 8, borderRadius: 99, backgroundColor: T.glass, borderWidth: 1, borderColor: T.border },
+  skipText: { fontFamily: 'Inter_700Bold', fontSize: 12, letterSpacing: 2, color: T.foreground, fontVariant: ['tabular-nums'] },
+  captionWrap: { position: 'absolute', left: 20, right: 20, alignItems: 'center' },
+  caption: { fontFamily: 'Inter_700Bold', fontSize: 18, letterSpacing: 2.5, textAlign: 'center', textShadowColor: T.scrim, textShadowRadius: 8 },
+  captionAlert: { fontSize: 20, backgroundColor: T.destructive, color: T.destructiveForeground, paddingHorizontal: 12, paddingVertical: 6, overflow: 'hidden' },
+  captionSfx: { fontStyle: 'italic', letterSpacing: 4 },
+  turnWrap: { alignItems: 'center', marginTop: 10 },
+  turnCard: { flexDirection: 'row', alignItems: 'center', gap: 12, paddingHorizontal: 16, paddingVertical: 10, borderRadius: colors.radius, backgroundColor: T.glass, borderWidth: 2, borderColor: T.primary },
+  turnCardOpen: { backgroundColor: T.primary, borderColor: T.primaryEdge },
+  turnCardArmed: { backgroundColor: T.accent, borderColor: T.accent },
+  turnLabel: { fontFamily: 'Inter_700Bold', fontSize: 17, letterSpacing: 2.5, color: T.primary },
+  turnSub: { fontFamily: 'Inter_500Medium', fontSize: 12, color: T.mutedForeground, fontVariant: ['tabular-nums'] },
+  turnRow: { flexDirection: 'row', justifyContent: 'space-between', paddingHorizontal: 14, marginBottom: 12 },
+  turnBtn: { width: 96, height: 76, borderRadius: colors.radius, backgroundColor: T.glass, borderWidth: 1, borderColor: T.border, alignItems: 'center', justifyContent: 'center', gap: 2 },
+  turnBtnHint: { borderColor: T.primary, borderWidth: 2 },
+  turnBtnArmed: { backgroundColor: T.accent, borderColor: T.accent },
+  turnBtnText: { fontFamily: 'Inter_700Bold', fontSize: 11, letterSpacing: 2, color: T.foreground },
+  padBtnOn: { backgroundColor: T.secondary, borderColor: T.primary, transform: [{ scale: 0.94 }] },
+  overlayHome: { paddingHorizontal: 22, backgroundColor: T.homeScrim },
+  brand: { alignItems: 'center', marginTop: 4 },
+  kickerRow: { flexDirection: 'row', alignItems: 'center', gap: 8, backgroundColor: T.glass, paddingHorizontal: 12, paddingVertical: 6, borderRadius: 99 },
+  kicker: { fontFamily: F.s, fontSize: 11, letterSpacing: 2.6, color: T.accent, textAlign: 'center' },
+  title: { fontFamily: F.b, fontSize: 52, lineHeight: 56, letterSpacing: 3, color: T.foreground, textAlign: 'center', marginTop: 14, textShadowColor: T.scrim, textShadowOffset: { width: 0, height: 3 }, textShadowRadius: 14 },
+  subtitle: { fontFamily: F.b, fontSize: 18, letterSpacing: 12, color: T.primary, textAlign: 'center', marginTop: 2, paddingLeft: 12 },
+  tag: { fontFamily: F.m, fontSize: 15, color: T.foreground, marginTop: 12, textAlign: 'center', opacity: 0.9, textShadowColor: T.scrim, textShadowRadius: 8 },
+  statsRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', paddingVertical: 12, marginBottom: 10, borderWidth: 1, borderColor: T.border, backgroundColor: T.glass, borderRadius: colors.radius },
+  stat: { flex: 1, alignItems: 'center' },
+  statValue: { fontFamily: F.b, fontSize: 19, color: T.foreground, fontVariant: ['tabular-nums'] },
+  statLabel: { fontFamily: F.s, fontSize: 9, letterSpacing: 1.8, color: T.mutedForeground, marginTop: 3 },
+  statDivider: { width: 1, height: 28, backgroundColor: T.border },
+  ctlCard: { backgroundColor: T.glass, borderWidth: 1, borderColor: T.border, borderRadius: colors.radius, padding: 12, gap: 10 },
+  seg: { flexDirection: 'row', backgroundColor: T.muted, borderRadius: 10, padding: 3 },
+  segBtn: { flex: 1, flexDirection: 'row', gap: 6, alignItems: 'center', justifyContent: 'center', paddingVertical: 8, borderRadius: 8 },
+  segOn: { backgroundColor: T.primary },
+  segText: { fontFamily: F.s, fontSize: 13, color: T.foreground },
+  ctlRow: { flexDirection: 'row', alignItems: 'center', gap: 10 },
+  statusDot: { width: 9, height: 9, borderRadius: 5 },
+  ctlTitle: { fontFamily: F.s, fontSize: 14, color: T.foreground },
+  ctlBody: { fontFamily: F.r, fontSize: 12, lineHeight: 17, color: T.mutedForeground },
+  calBtn: { flexDirection: 'row', alignItems: 'center', gap: 6, paddingHorizontal: 12, paddingVertical: 8, borderRadius: 99, borderWidth: 1, borderColor: T.accent },
+  calText: { fontFamily: F.s, fontSize: 13, color: T.accent },
+  cta: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 10, backgroundColor: T.primary, paddingVertical: 17, borderRadius: colors.radius, borderBottomWidth: 4, borderBottomColor: T.primaryEdge },
+  ctaText: { fontFamily: F.b, fontSize: 19, letterSpacing: 4, color: T.primaryForeground },
+  pressed: { opacity: 0.85, transform: [{ scale: 0.97 }] },
+  ghost: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8, paddingVertical: 13, paddingHorizontal: 14 },
+  ghostText: { fontFamily: F.s, fontSize: 15, color: T.accent },
+  rowBtns: { flexDirection: 'row', justifyContent: 'center', gap: 16 },
+  scrim: { backgroundColor: T.scrim, justifyContent: 'center', paddingHorizontal: 20 },
+  scrollCenter: { flexGrow: 1, justifyContent: 'center', paddingVertical: 12 },
+  panel: { backgroundColor: T.card, borderRadius: colors.radius + 6, padding: 20, borderWidth: 1, borderColor: T.border, gap: 10, width: '100%', maxWidth: 440, alignSelf: 'center' },
+  panelTitle: { fontFamily: F.b, fontSize: 30, color: T.foreground, textAlign: 'center' },
+  panelSub: { fontFamily: F.r, fontSize: 14, lineHeight: 20, color: T.mutedForeground, textAlign: 'center' },
+  resultBig: { fontFamily: F.b, fontSize: 58, color: T.primary, textAlign: 'center', letterSpacing: -2, fontVariant: ['tabular-nums'] },
+  badge: { flexDirection: 'row', gap: 6, alignSelf: 'center', alignItems: 'center', backgroundColor: T.accent, paddingHorizontal: 12, paddingVertical: 5, borderRadius: 99 },
+  badgeText: { fontFamily: F.b, fontSize: 11, letterSpacing: 2, color: T.accentForeground },
+  errorBar: { flexDirection: 'row', alignItems: 'center', gap: 8, backgroundColor: T.destructive, padding: 12, borderRadius: colors.radius, marginBottom: 10 },
+  errorText: { flex: 1, fontFamily: F.m, fontSize: 13, color: T.destructiveForeground },
+  helpRow: { flexDirection: 'row', gap: 14, alignItems: 'flex-start' },
+  helpIcon: { width: 38, height: 38, borderRadius: 19, borderWidth: 1, borderColor: T.border, alignItems: 'center', justifyContent: 'center', backgroundColor: T.muted },
+  helpTitle: { fontFamily: F.s, fontSize: 15, color: T.foreground },
+  helpBody: { fontFamily: F.r, fontSize: 13, lineHeight: 19, color: T.mutedForeground, marginTop: 2 },
+});

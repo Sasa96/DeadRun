@@ -14,7 +14,14 @@
         "ITSAppUsesNonExemptEncryption": false
       }
     },
-    "android": {},
+    "android": {
+      "permissions": [
+        "android.permission.MODIFY_AUDIO_SETTINGS",
+        "android.permission.FOREGROUND_SERVICE",
+        "android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK",
+        "com.google.android.gms.permission.AD_ID"
+      ]
+    },
     "web": {
       "favicon": "./assets/images/icon.png",
       "output": "static"
@@ -63,6 +70,17 @@
     "experiments": {
       "typedRoutes": true,
       "reactCompiler": true
-    }
+    },
+    "extra": {
+      "router": {
+        "asyncRoutes": {
+          "web": true
+        }
+      },
+      "eas": {
+        "projectId": "e73f74b0-e2dd-4649-822b-4c7d0bf4b58f"
+      }
+    },
+    "owner": "sasa96"
   }
 }

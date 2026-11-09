@@ -6,6 +6,14 @@
   "build": {
     "production": {
       "autoIncrement": true
+    },
+    "simulator": {
+      "ios": {
+        "simulator": true
+      },
+      "env": {
+        "EXPO_PUBLIC_ADS_TEST": "1"
+      }
     }
   },
   "submit": {

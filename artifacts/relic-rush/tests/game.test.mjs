@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { newSim, advance, requestTurn, stageAt, stageInfo, STAGE_LEN, setLane, canRevive, revive, REVIVE_CLEAR } from '../lib/game.ts';
+import { newSim, advance, requestTurn, stageAt, stageInfo, STAGE_LEN, setLane, canRevive, revive, REVIVE_CLEAR, newMissionSim, specialTypes, specialChance } from '../lib/game.ts';
 import { newIntro, stepIntro, skipIntro, introShot, INTRO_LEN } from '../lib/intro.ts';
 import { tiltLane } from '../lib/tilt.ts';
 
@@ -356,4 +356,48 @@ test('revive resumes once: clears the threat ahead, takes a missed corner, keeps
 
   // home/run modes cannot revive
   assert.equal(revive(newSim('run')), false);
+});
+
+test('special infected unlock one per mission and never appear in mission 1 or endless', () => {
+  assert.deepEqual(specialTypes(null), []);
+  assert.deepEqual(specialTypes(1), []);
+  assert.deepEqual(specialTypes(2), ['crawler']);
+  assert.deepEqual(specialTypes(3), ['crawler', 'sprinter']);
+  assert.deepEqual(specialTypes(4), ['crawler', 'sprinter', 'brute']);
+  assert.deepEqual(specialTypes(10), ['crawler', 'sprinter', 'brute']);
+  assert.equal(specialChance(1), 0);
+  assert(specialChance(3) > specialChance(2) && specialChance(10) <= 0.6);
+  const endless = newSim('run');
+  for (let i = 0; i < 4000 && endless.mode === 'run'; i++) { endless.horde = 99; endless.invulnerableT = 1; endless.obstacles = endless.obstacles.filter((o) => o.type !== 'gap'); requestTurn(endless, endless.turn.dir); advance(endless, 1 / 30); }
+  assert(endless.walkers.every((w) => w.type === 'walker'));
+  // later missions actually spawn them, and every row still leaves a lane open
+  const seen = new Set();
+  for (let n = 0; n < 12 && seen.size < 3; n++) {
+    const m = newMissionSim(6);
+    for (let i = 0; i < 3000 && m.mode === 'run'; i++) {
+      // sinkholes are always fatal; remove them so the run reaches the end
+      m.horde = 99; m.invulnerableT = 1; m.obstacles = m.obstacles.filter((o) => o.type !== 'gap');
+      requestTurn(m, m.turn.dir); advance(m, 1 / 30);
+      for (const w of m.walkers) {
+        seen.add(w.type);
+        if (w.type === 'brute') assert(Math.abs(w.lane) === 0.5);
+      }
+    }
+  }
+  assert(seen.has('crawler') && seen.has('sprinter') && seen.has('brute'));
+});
+test('crawlers are jumped, brutes block two lanes and cannot be jumped', () => {
+  const crawl = () => { const s = clearRun(); s.horde = 1; s.walkers = [{ id: 1, s: 0.5, lane: 0, v: 1.5, kind: 0, type: 'crawler' }]; return s; };
+  const ground = crawl(); advance(ground, 0.05);
+  assert.equal(ground.deathCause, 'walker'); assert.equal(ground.deathWalker, 'crawler');
+  const air = crawl(); air.jy = 0.9; air.vy = 4; advance(air, 0.05);
+  assert.equal(air.mode, 'run');
+  const brute = (px) => { const s = clearRun(); s.horde = 1; s.lane = px; s.px = px; s.walkers = [{ id: 1, s: 0.3, lane: 0.5, v: 2, kind: 0, type: 'brute' }]; advance(s, 0.05); return s; };
+  assert.equal(brute(0).deathWalker, 'brute');
+  assert.equal(brute(1).deathWalker, 'brute');
+  assert.equal(brute(-1).mode, 'run');
+  const jumpBrute = clearRun(); jumpBrute.horde = 1; jumpBrute.jy = 1.2; jumpBrute.vy = 4;
+  jumpBrute.walkers = [{ id: 1, s: 0.3, lane: 0.5, v: 2, kind: 0, type: 'brute' }];
+  advance(jumpBrute, 0.05);
+  assert.equal(jumpBrute.deathWalker, 'brute');
 });

@@ -23,8 +23,29 @@ export const WALKER_START = 150;
 /** lateral half-width (lane units, 1 lane = 2 m) and longitudinal half-depth (m) of a walker hit */
 export const WALKER_HALF_W = 0.38;
 export const WALKER_HALF_D = 0.45;
+/**
+ * Special infected (campaign missions 2+):
+ * sprinter — charges at 2-3x walker speed; dodge early.
+ * brute — huge, stands between two lanes and blocks both; find the third.
+ * crawler — low on the ground; jump over it (sidestep works too, sliding does not).
+ */
+export type WalkerType = 'walker' | 'sprinter' | 'brute' | 'crawler';
+/** extra lateral reach of a brute: centred on a lane boundary, it covers both neighbouring lanes */
+export const BRUTE_HALF_W = WALKER_HALF_W + 0.5;
+/** a crawler is long and low: deeper hitbox, cleared by any jump above this height */
+export const CRAWLER_HALF_D = 0.6;
+export const CRAWLER_CLEAR = 0.5;
 /** An infected walking straight toward the runner along its fixed lane. `s` decreases at `v` m/s. */
-export interface Walker { id: number; s: number; lane: number; v: number; kind: number }
+export interface Walker { id: number; s: number; lane: number; v: number; kind: number; type: WalkerType }
+/** Special infected introduced one per mission: crawlers in 2, sprinters in 3, brutes from 4. Mission 1 and endless keep plain walkers. */
+export function specialTypes(missionId: number | null | undefined): WalkerType[] {
+  if (!missionId || missionId < 2) return [];
+  return (['crawler', 'sprinter', 'brute'] as WalkerType[]).slice(0, Math.min(3, missionId - 1));
+}
+/** chance a walker row is a special infected, rising with the mission */
+export function specialChance(missionId: number | null | undefined) {
+  return !missionId || missionId < 2 ? 0 : Math.min(0.6, 0.3 + (missionId - 2) * 0.04);
+}
 
 export function stageAt(dist: number): StageId { return STAGES[((Math.floor(Math.max(0, dist) / STAGE_LEN) % 3) + 3) % 3]; }
 export interface StageInfo { id: StageId; name: string; cycle: number; progress: number; remaining: number; next: StageId }
@@ -77,6 +98,8 @@ export interface Sim {
   deathCause: DeathCause | null;
   /** character kind of the walker that caught you (deathCause 'walker') */
   deathKind: number | null;
+  /** walker type that caught you (deathCause 'walker') */
+  deathWalker: WalkerType | null;
   walkers: Walker[];
   uid: number;
   /** upcoming corner (always set) */
@@ -273,7 +296,7 @@ function baseSim(mode: Mode): Sim {
     campaign: null,
     mode, dist: 0, speed: START_SPEED, lane: 0, px: 0, jy: 0, vy: 0, slideT: 0, phase: 0,
     obstacles: [], coins: [], pops: [], nextS: 34, coinsRun: 0, time: 0, shake: 0, flash: 0,
-    dieT: 0, deathCause: null, deathKind: null, walkers: [], uid: 2, horde: HORDE_REST,
+    dieT: 0, deathCause: null, deathKind: null, deathWalker: null, walkers: [], uid: 2, horde: HORDE_REST,
     pickups: [], shieldT: 0, flashlightT: 0, distractionT: 0, stumbleT: 0, invulnerableT: 0,
     cleanTime: 0, pickupsRun: 0, jumps: 0, slides: 0, nearMisses: 0, outfit: 'scout', revives: 0, deathSpeed: 0,
     turn: { id: 1, s: 0, dir: 1 }, lastTurn: null, turnReq: 0, turnFx: 99, turnsTaken: 0, turnDirs: [],
@@ -308,20 +331,25 @@ function spawnWalkers(s: Sim, at: number) {
   const kinds = STAGE_KINDS[simStageAt(s, at)];
   if (s.walkers.length >= WALKER_MAX) return false;
   const df = simDifficulty(s, at);
-  const count = Math.random() < 0.12 + df.density * 0.45 ? 2 : 1;
-  const lanes = [-1, 0, 1].sort(() => Math.random() - 0.5).slice(0, Math.min(count, WALKER_MAX - s.walkers.length));
+  const specials = specialTypes(s.campaign?.id);
+  const special: WalkerType | null = specials.length && Math.random() < specialChance(s.campaign?.id) ? specials[Math.floor(Math.random() * specials.length)] : null;
+  // A brute fills two lanes, so it always walks alone, centred on a lane boundary.
+  const count = special === 'brute' ? 1 : Math.random() < 0.12 + df.density * 0.45 ? 2 : 1;
+  const lanes = special === 'brute' ? [Math.random() < 0.5 ? -0.5 : 0.5] : [-1, 0, 1].sort(() => Math.random() - 0.5).slice(0, Math.min(count, WALKER_MAX - s.walkers.length));
   const J = s.turn.s;
   const made: Walker[] = [];
   for (const lane of lanes) {
     const avail = kinds.filter((k) => s.walkers.filter((w) => w.kind === k).length + made.filter((w) => w.kind === k).length < WALKER_PER_KIND);
     if (!avail.length) break;
-    const v = rand(2.5, df.walkerVMax);
+    // Only the first of a pair is special, so a row never holds two surprises.
+    const type: WalkerType = made.length === 0 && special ? special : 'walker';
+    const v = type === 'sprinter' ? rand(8, 10) + df.level * 2 : type === 'brute' ? rand(2, 3.2) : type === 'crawler' ? rand(1, 2) : rand(2.5, df.walkerVMax);
     const s0 = at + v * Math.max(0, at - s.dist) / Math.max(1, s.speed);
     // the whole walk (spawn -> meet) must stay out of the corner corridor
     if (at < J && s0 + 2 > J - clearBefore(s.speed)) return false;
-    // never spawn already overlapping/behind the runner's reach: needs at least 1.2s to react at closing speed
-    if ((s0 - s.dist) / (s.speed + v) < 1.2) return false;
-    made.push({ id: s.uid++, s: s0, lane, v, kind: avail[Math.floor(Math.random() * avail.length)] });
+    // never spawn already overlapping/behind the runner's reach: needs at least 1.2s (sprinters 1.5s) to react at closing speed
+    if ((s0 - s.dist) / (s.speed + v) < (type === 'sprinter' ? 1.5 : 1.2)) return false;
+    made.push({ id: s.uid++, s: s0, lane, v, kind: avail[Math.floor(Math.random() * avail.length)], type });
   }
   if (!made.length) return false;
   s.walkers.push(...made);
@@ -516,10 +544,12 @@ export function step(s: Sim, dt: number): { coin: boolean; died: boolean; turned
 
   for (const w of s.walkers) {
     w.s -= w.v * dt;
-    if (Math.abs(w.lane - s.px) > WALKER_HALF_W || Math.abs(w.s - s.dist) > WALKER_HALF_D) continue;
+    if (Math.abs(w.lane - s.px) > (w.type === 'brute' ? BRUTE_HALF_W : WALKER_HALF_W)) continue;
+    if (Math.abs(w.s - s.dist) > (w.type === 'crawler' ? CRAWLER_HALF_D : WALKER_HALF_D)) continue;
+    if (w.type === 'crawler' && s.jy >= CRAWLER_CLEAR) continue;
     if (s.invulnerableT > 0) continue;
     if (absorbHit(s)) { out.stumbled = true; continue; }
-    die(s, 'walker', 0.6); s.deathKind = w.kind;
+    die(s, 'walker', 0.6); s.deathKind = w.kind; s.deathWalker = w.type;
     out.died = true;
     return out;
   }
@@ -574,7 +604,7 @@ export function revive(s: Sim) {
   // Never resume straight into an unarmed corner.
   if (s.turn.s - s.dist < REVIVE_CLEAR) s.turnReq = s.turn.dir;
   s.mode = 'run'; s.revives += 1;
-  s.deathCause = null; s.deathKind = null; s.dieT = 0;
+  s.deathCause = null; s.deathKind = null; s.deathWalker = null; s.dieT = 0;
   s.jy = 0; s.vy = 0; s.slideT = 0; s.stumbleT = 0;
   s.invulnerableT = REVIVE_INVULNERABLE; s.horde = HORDE_REST; s.shake = 0; s.flash = 0.3;
   s.speed = Math.max(START_SPEED, s.deathSpeed * 0.85);

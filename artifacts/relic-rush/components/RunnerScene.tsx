@@ -11,7 +11,7 @@ import { createIntro, type Intro } from '@/components/IntroCinematic';
 import { createMissionCutscene, type MissionCutscene } from '@/components/MissionCutscene';
 import { buildMissionScenery, type Placer } from '@/components/missionScenery';
 import { missionById } from '@/lib/campaign';
-import { animateSurvivor, animateZombie, animateZombieCharge, buildSurvivor, buildZombie, cloneRig, ZOMBIE_KINDS, type OutfitLook } from '@/components/characters';
+import { animateSurvivor, animateZombie, animateZombieCharge, animateZombieCrawl, buildSurvivor, buildZombie, cloneRig, ZOMBIE_KINDS, type OutfitLook } from '@/components/characters';
 
 const T = colors.light;
 const LW = 2.0; // metres between lane centres
@@ -742,10 +742,15 @@ function createEngine(gl: ExpoWebGLRenderingContext, w: number, h: number) {
       slot.used = true;
       const g = segOf(wk.s); at(g, wk.s, wk.lane * LW);
       const caught = dying && s.deathCause === 'walker' && Math.abs(z) < 1.5;
+      // brutes are 1.8x tall and wide, spanning the two lanes they block
+      const size = wk.type === 'brute' ? 1.8 : 1;
       slot.r.root.visible = true; slot.r.root.position.set(P.x, g.y, P.z); slot.r.root.rotation.y = g.yaw + Math.PI;
+      slot.r.root.scale.setScalar(size);
       if (caught) animateZombie(slot.r, slot.gait, s.time * (4 + wk.v * 0.6) + wk.id, lunge);
-      else animateZombieCharge(slot.r, slot.gait, s.time * (7 + wk.v) + wk.id);
-      slot.sh.visible = true; slot.sh.position.set(P.x, 0.02 + g.y, P.z);
+      else if (wk.type === 'crawler') animateZombieCrawl(slot.r, slot.gait, s.time * 5 + wk.id);
+      else if (wk.type === 'brute') animateZombie(slot.r, slot.gait, s.time * 3.2 + wk.id, 0.6);
+      else animateZombieCharge(slot.r, slot.gait, s.time * (wk.type === 'sprinter' ? 14 : 7 + wk.v) + wk.id);
+      slot.sh.visible = true; slot.sh.position.set(P.x, 0.02 + g.y, P.z); slot.sh.scale.setScalar(size);
     }
     for (const pool of walkerPools) for (const w of pool) if (!w.used) { w.r.root.visible = false; w.sh.visible = false; }
 

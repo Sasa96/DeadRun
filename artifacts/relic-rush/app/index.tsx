@@ -5,7 +5,7 @@ import { Feather, MaterialCommunityIcons } from '@expo/vector-icons';
 import * as Haptics from 'expo-haptics';
 import colors from '@/constants/colors';
 import { RunnerScene, type SceneApi } from '@/components/RunnerScene';
-import { actions, advance, canRevive, revive, simDifficulty, routeInfo, simStageAt, newMissionSim, newSim, requestTurn, setLane, stageInfo, steer, turnInfo, START_SPEED, MAX_SPEED, STAGE_NAMES, type Sim, type Mode, type StageId, type TurnDir } from '@/lib/game';
+import { actions, advance, canRevive, revive, simDifficulty, routeInfo, simStageAt, newMissionSim, newSim, requestTurn, setLane, stageInfo, steer, turnInfo, START_SPEED, MAX_SPEED, STAGE_NAMES, type Sim, type Mode, type WalkerType, type StageId, type TurnDir } from '@/lib/game';
 import { INTRO_LEN, introCaption, newIntro, skipIntro, stepIntro, type IntroCaption } from '@/lib/intro';
 import { useProgress } from '@/context/ProgressContext';
 import { useTiltControls } from '@/hooks/useTiltControls';
@@ -65,6 +65,17 @@ const WALKER_CAUSE: Record<number, string> = {
   7: 'A doctor in a bloody coat caught you in the corridor. Sidestep before contact.',
   8: 'A nurse zombie collided with you on the ward. Move to the open lane.',
 };
+// special infected (missions 2+): first-sighting warning and death message
+const SPECIAL_WARN: Record<Exclude<WalkerType, 'walker'>, string> = {
+  crawler: 'Crawler ahead. It is low on the ground: jump over it.',
+  sprinter: 'Sprinter! It charges fast. Change lanes early.',
+  brute: 'Brute ahead. It blocks two lanes. Find the open one.',
+};
+const SPECIAL_CAUSE: Record<Exclude<WalkerType, 'walker'>, string> = {
+  crawler: 'A crawler grabbed your ankles. Jump over the ones on the ground.',
+  sprinter: 'A sprinter ran you down. Move lanes as soon as you see one charging.',
+  brute: 'A brute flattened you. It fills two lanes, so head for the third.',
+};
 const STAGE_ICON: Record<StageId, React.ComponentProps<typeof MaterialCommunityIcons>['name']> = { city: 'city-variant-outline', police: 'police-badge-outline', hospital: 'hospital-box-outline' };
 const TONE_COLOR: Record<IntroCaption['tone'], string> = { time: T.mutedForeground, sfx: T.foreground, alert: T.destructive, action: T.primary };
 
@@ -93,7 +104,7 @@ export default function Game() {
   const [cut, setCut] = useState<{ id: number; t: number; replay: boolean } | null>(null);
   const completeRef = useRef(progress.completeMission); completeRef.current = progress.completeMission;
   const campaignRef = useRef(progress.campaign); campaignRef.current = progress.campaign;
-  const lastRecRef = useRef(0); const lastActRef = useRef(false);
+  const lastRecRef = useRef(0); const lastActRef = useRef(false); const seenSpecialRef = useRef(new Set<WalkerType>());
   const sceneRef = useRef<SceneApi | null>(null);
   const appActiveRef = useRef(AppState.currentState === 'active');
   const [sceneReady, setSceneReady] = useState(false);
@@ -209,6 +220,11 @@ export default function Game() {
           const act = s.campaign.activationT > 0 || s.campaign.activated;
           if (act && !lastActRef.current) { lastActRef.current = true; sfxRef.current('stage'); toastRef.current({ text: 'Beacon powering up. Keep running for the pier.', tone: 'good', icon: 'radio', until: now + 2800 }); }
         }
+        for (const w of s.walkers) {
+          if (!w.type || w.type === 'walker' || seenSpecialRef.current.has(w.type) || w.s - s.dist > 60) continue;
+          seenSpecialRef.current.add(w.type); haptic('heavy');
+          toastRef.current({ text: SPECIAL_WARN[w.type], tone: 'warn', icon: 'alert-octagon', until: now + 2800 });
+        }
         if (ev.completed) completeOnceRef.current();
         if (s.mode === 'run') {
           const sid = simStageAt(s, s.dist);
@@ -241,7 +257,7 @@ export default function Game() {
     const stats = { turns: s.turnsTaken, jumps: s.jumps, slides: s.slides, pickups: s.pickupsRun };
     const best = recordRef.current(dist, s.coinsRun, stats);
     setOffer(false); setToast(null);
-    setResult({ dist, coins: s.coinsRun, best, ...stats, cause: s.deathCause === 'walker' ? (WALKER_CAUSE[s.deathKind ?? 0] ?? WALKER_CAUSE[0]) : CAUSE[s.deathCause ?? 'gap'] });
+    setResult({ dist, coins: s.coinsRun, best, ...stats, cause: s.deathCause === 'walker' ? (s.deathWalker && s.deathWalker !== 'walker' ? SPECIAL_CAUSE[s.deathWalker] : WALKER_CAUSE[s.deathKind ?? 0] ?? WALKER_CAUSE[0]) : CAUSE[s.deathCause ?? 'gap'] });
     setMode('over');
     showOverlay();
   }, [showOverlay]);
@@ -301,7 +317,7 @@ export default function Game() {
     if (!sceneRef.current || !progressLoadedRef.current) return;
     endCutRef.current(true);
     simRef.current = freshSim('run');
-    lastRecRef.current = 0; lastActRef.current = false;
+    lastRecRef.current = 0; lastActRef.current = false; seenSpecialRef.current.clear();
     completionRef.current = null; setCompletion(null); setPhase('none'); setSaveBusy(false);
     setActiveMission(missionRef.current);
     setMenu('home');
@@ -766,6 +782,7 @@ export default function Game() {
               <HelpRow icon="crosshair" title="Calibrate first" body="Hold the phone the way you will play, neutral and still, then tap Calibrate. It takes about half a second." />
               <HelpRow icon="corner-up-right" title="Turn at corners" body="Streets end in dead ends. Arrows, roadside signs and a countdown show which way the open street goes. Swipe that way, tap the turn button, or press the arrow key as you reach the corner. The faster you run, the earlier it accepts your turn. Tilt never turns you; it only moves you across the street." />
               <HelpRow icon="users" title="Infected walk at you" body="Some infected come straight down a lane toward you. They never swerve. You cannot jump or slide past them, so move to an empty lane. There is always one open." />
+              <HelpRow icon="alert-octagon" title="Special infected" body="From mission 2 the campaign adds new infected, one per mission. Crawlers stay low: jump over them. Sprinters charge fast: change lanes early. Brutes block two lanes at once: find the third." />
               <HelpRow icon="map" title="Three zones, then repeat" body="Every 900 m the route changes: ruined city streets, then the Precinct 9 police station, then St. Agnes Hospital, then back outside. Uniformed officers patrol the precinct; doctors and nurses roam the wards. Your distance and speed carry through." />
               <HelpRow icon="arrow-up" title="Swipe up or tap Jump" body="Clear sinkholes and concrete barricades." />
               <HelpRow icon="arrow-down" title="Swipe down or tap Slide" body="Duck under quarantine gates. Mid-air, it drops you fast." />

@@ -609,6 +609,20 @@ export function animateZombieCharge(r: Rig, g: ZombieGait, t: number) {
   r.foreL.rotation.x = 0.35 + Math.max(0, cs) * 0.3; r.foreR.rotation.x = 0.35 + Math.max(0, -cs) * 0.3;
 }
 
+/** Crawler: belly low to the road, clawing forward hand over hand, legs dragging behind. */
+export function animateZombieCrawl(r: Rig, g: ZombieGait, t: number) {
+  const sn = Math.sin(t); const cs = Math.cos(t);
+  r.root.rotation.z = sn * 0.05;
+  r.hips.position.y = 0.32 + Math.abs(cs) * 0.03;
+  r.hips.rotation.set(-1.35, sn * 0.12, 0);
+  r.torso.rotation.set(-0.1 + Math.abs(sn) * 0.05, -sn * 0.15, g.tilt * 0.2);
+  r.head.rotation.set(1.1 + Math.sin(t * 2.3) * 0.08, Math.sin(t * 7) * 0.08, g.tilt);
+  r.legL.rotation.set(0.1 + sn * 0.12, 0, 0.12); r.legR.rotation.set(0.1 - sn * 0.12, 0, -0.12);
+  r.shinL.rotation.x = -0.15; r.shinR.rotation.x = -0.15;
+  r.armL.rotation.set(2.6 + sn * 0.45, 0, -0.2); r.armR.rotation.set(2.6 - sn * 0.45, 0, 0.2);
+  r.foreL.rotation.x = 0.2 + Math.max(0, cs) * 0.5; r.foreR.rotation.x = 0.2 + Math.max(0, -cs) * 0.5;
+}
+
 /** Clone a built rig sharing geometry/material (pooled walkers). */
 export function cloneRig(r: Rig): Rig {
   const root = r.root.clone(true);

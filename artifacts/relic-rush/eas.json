@@ -1,0 +1,17 @@
+{
+  "cli": {
+    "version": ">= 16.0.0",
+    "appVersionSource": "remote"
+  },
+  "build": {
+    "production": {
+      "autoIncrement": true,
+      "env": {
+        "EXPO_PUBLIC_ADS_TEST": "1"
+      }
+    }
+  },
+  "submit": {
+    "production": {}
+  }
+}

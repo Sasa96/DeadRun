@@ -104,6 +104,10 @@ export interface Sim {
   slides: number;
   nearMisses: number;
   outfit: OutfitId;
+  /** second chances used this run (rewarded-ad revive) */
+  revives: number;
+  /** running speed at the moment of death, restored (partly) on revive */
+  deathSpeed: number;
 }
 
 export const GAP_LEN = 2.6;
@@ -271,7 +275,7 @@ function baseSim(mode: Mode): Sim {
     obstacles: [], coins: [], pops: [], nextS: 34, coinsRun: 0, time: 0, shake: 0, flash: 0,
     dieT: 0, deathCause: null, deathKind: null, walkers: [], uid: 2, horde: HORDE_REST,
     pickups: [], shieldT: 0, flashlightT: 0, distractionT: 0, stumbleT: 0, invulnerableT: 0,
-    cleanTime: 0, pickupsRun: 0, jumps: 0, slides: 0, nearMisses: 0, outfit: 'scout',
+    cleanTime: 0, pickupsRun: 0, jumps: 0, slides: 0, nearMisses: 0, outfit: 'scout', revives: 0, deathSpeed: 0,
     turn: { id: 1, s: 0, dir: 1 }, lastTurn: null, turnReq: 0, turnFx: 99, turnsTaken: 0, turnDirs: [],
   } as Sim;
 }
@@ -492,7 +496,7 @@ export function step(s: Sim, dt: number): { coin: boolean; died: boolean; turned
     else if (s.dist >= j.s + TURN_LATE) cause = 'corner';
     if (cause) {
       s.dist = Math.min(s.dist, j.s + DEAD_END);
-      s.mode = 'dying'; s.deathCause = cause; s.shake = 0.5; s.flash = 1; s.dieT = 0;
+      die(s, cause, 0.5);
       out.died = true;
       return out;
     }
@@ -514,7 +518,7 @@ export function step(s: Sim, dt: number): { coin: boolean; died: boolean; turned
     if (Math.abs(w.lane - s.px) > WALKER_HALF_W || Math.abs(w.s - s.dist) > WALKER_HALF_D) continue;
     if (s.invulnerableT > 0) continue;
     if (absorbHit(s)) { out.stumbled = true; continue; }
-    s.mode = 'dying'; s.deathCause = 'walker'; s.deathKind = w.kind; s.shake = 0.6; s.flash = 1; s.dieT = 0;
+    die(s, 'walker', 0.6); s.deathKind = w.kind;
     out.died = true;
     return out;
   }
@@ -530,7 +534,7 @@ export function step(s: Sim, dt: number): { coin: boolean; died: boolean; turned
     if (hit) {
       if (o.type !== 'gap' && s.invulnerableT > 0) continue;
       if (o.type !== 'gap' && absorbHit(s)) { out.stumbled = true; continue; }
-      s.mode = 'dying'; s.deathCause = o.type; s.shake = 0.5; s.flash = 1; s.dieT = 0;
+      die(s, o.type, 0.5);
       out.died = true;
       return out;
     }
@@ -546,6 +550,34 @@ export function step(s: Sim, dt: number): { coin: boolean; died: boolean; turned
   if (s.obstacles.length && s.obstacles[0].s - s.dist <= -DESPAWN_BEHIND) s.obstacles = s.obstacles.filter((o) => o.s - s.dist > -DESPAWN_BEHIND);
   if (s.coins.length && (s.coins[0].s - s.dist <= -3 || s.coins.some((c) => c.taken))) s.coins = s.coins.filter((c) => c.s - s.dist > -3 && !c.taken);
   return out;
+}
+
+function die(s: Sim, cause: DeathCause, shake: number) {
+  s.deathSpeed = s.speed;
+  s.mode = 'dying'; s.deathCause = cause; s.shake = shake; s.flash = 1; s.dieT = 0;
+}
+
+// ---- revive (rewarded ad) ----
+export const MAX_REVIVES = 1;
+/** metres ahead cleared of hazards on revive */
+export const REVIVE_CLEAR = 40;
+export const REVIVE_INVULNERABLE = 2.5;
+export function canRevive(s: Sim) { return s.mode === 'over' && s.revives < MAX_REVIVES; }
+/** Second chance after the run ended: clears the immediate threat, pushes the horde back and resumes. */
+export function revive(s: Sim) {
+  if (!canRevive(s)) return false;
+  // A missed corner is taken for you; you resume on the open street.
+  if (s.deathCause === 'corner' || s.deathCause === 'wrongway') executeTurn(s);
+  s.obstacles = s.obstacles.filter((o) => o.s < s.dist - GAP_LEN - 1 || o.s > s.dist + REVIVE_CLEAR);
+  s.walkers = s.walkers.filter((w) => w.s < s.dist - 1 || w.s > s.dist + REVIVE_CLEAR);
+  // Never resume straight into an unarmed corner.
+  if (s.turn.s - s.dist < REVIVE_CLEAR) s.turnReq = s.turn.dir;
+  s.mode = 'run'; s.revives += 1;
+  s.deathCause = null; s.deathKind = null; s.dieT = 0;
+  s.jy = 0; s.vy = 0; s.slideT = 0; s.stumbleT = 0;
+  s.invulnerableT = REVIVE_INVULNERABLE; s.horde = HORDE_REST; s.shake = 0; s.flash = 0.3;
+  s.speed = Math.max(START_SPEED, s.deathSpeed * 0.85);
+  return true;
 }
 
 /** A shield absorbs one impact; otherwise a recoverable stumble requires space from the horde. */

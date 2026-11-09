@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { newSim, advance, requestTurn, stageAt, stageInfo, STAGE_LEN, setLane } from '../lib/game.ts';
+import { newSim, advance, requestTurn, stageAt, stageInfo, STAGE_LEN, setLane, canRevive, revive, REVIVE_CLEAR, START_SPEED } from '../lib/game.ts';
 import { newIntro, stepIntro, skipIntro, introShot, INTRO_LEN } from '../lib/intro.ts';
 import { tiltLane } from '../lib/tilt.ts';
 
@@ -315,4 +315,45 @@ test('render pool capacity covers every live obstacle (all one type, max density
       assert.ok(peak <= OB_POOL_CAP, `peak ${peak} > cap ${OB_POOL_CAP}`);
     } finally { Math.random = orig; }
   }
+});
+test('revive resumes once: clears the threat ahead, takes a missed corner, keeps distance and stats', () => {
+  // obstacle death
+  const s = clearRun(1);
+  s.turn = { id: 99, s: 500, dir: 1 };
+  s.dist = 50; s.speed = 20; s.horde = 1;
+  s.obstacles.push({ id: 7, s: 50.2, lane: 0, type: 'hurdle' }, { id: 8, s: 50 + REVIVE_CLEAR + 5, lane: 0, type: 'beam' });
+  s.walkers.push({ id: 9, s: 70, lane: 1, v: 3, kind: 0 });
+  s.coinsRun = 4;
+  for (let i = 0; i < 200 && s.mode !== 'over'; i++) advance(s, 0.05);
+  assert.equal(s.mode, 'over');
+  assert.equal(s.deathCause, 'hurdle');
+  assert.equal(canRevive(s), true);
+  const dist = s.dist;
+  assert.equal(revive(s), true);
+  assert.equal(s.mode, 'run');
+  assert.equal(s.dist, dist);
+  assert.equal(s.coinsRun, 4);
+  assert.deepEqual(s.obstacles.map((o) => o.id), [8]);
+  assert.equal(s.walkers.length, 0);
+  assert.ok(s.invulnerableT > 0);
+  assert.ok(s.speed >= START_SPEED && s.speed < 20);
+  assert.equal(canRevive(s), false);
+  // only one revive per run
+  s.mode = 'over';
+  assert.equal(revive(s), false);
+
+  // missed corner: revive takes it and does not immediately die again
+  const c = clearRun(-1);
+  c.dist = 9.8;
+  for (let i = 0; i < 200 && c.mode !== 'over'; i++) advance(c, 0.05);
+  assert.equal(c.deathCause, 'corner');
+  const taken = c.turnsTaken;
+  assert.equal(revive(c), true);
+  assert.equal(c.turnsTaken, taken + 1);
+  assert.ok(c.turn.s > c.dist + REVIVE_CLEAR);
+  for (let i = 0; i < 20; i++) advance(c, 0.05);
+  assert.equal(c.mode, 'run');
+
+  // home/run modes cannot revive
+  assert.equal(revive(newSim('run')), false);
 });

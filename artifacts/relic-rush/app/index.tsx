@@ -5,12 +5,13 @@ import { Feather, MaterialCommunityIcons } from '@expo/vector-icons';
 import * as Haptics from 'expo-haptics';
 import colors from '@/constants/colors';
 import { RunnerScene, type SceneApi } from '@/components/RunnerScene';
-import { actions, advance, simDifficulty, routeInfo, simStageAt, newMissionSim, newSim, requestTurn, setLane, stageInfo, steer, turnInfo, START_SPEED, MAX_SPEED, STAGE_NAMES, type Sim, type Mode, type StageId, type TurnDir } from '@/lib/game';
+import { actions, advance, canRevive, revive, simDifficulty, routeInfo, simStageAt, newMissionSim, newSim, requestTurn, setLane, stageInfo, steer, turnInfo, START_SPEED, MAX_SPEED, STAGE_NAMES, type Sim, type Mode, type StageId, type TurnDir } from '@/lib/game';
 import { INTRO_LEN, introCaption, newIntro, skipIntro, stepIntro, type IntroCaption } from '@/lib/intro';
 import { useProgress } from '@/context/ProgressContext';
 import { useTiltControls } from '@/hooks/useTiltControls';
 import { useIntroSound } from '@/hooks/useIntroSound';
 import { useGameAudio, type AudioPrefs } from '@/hooks/useGameAudio';
+import { useRewardedAd } from '@/hooks/useRewardedAd';
 import { HordeMeter, POWER, PowerChips, SensitivityRow, Toast, type PowerType } from '@/components/Loadout';
 import { TrophyMenu, TrophyReveal } from '@/components/TrophyMenu';
 import { CampaignMap, CutsceneOverlay, MissionHud, MissionSaveError, MissionSaving, MissionSuccess, ModeChooser, type MissionHudData } from '@/components/CampaignUI';
@@ -113,6 +114,12 @@ export default function Game() {
   const audio = useGameAudio(mode === 'run' && !introOn, mode === 'run' ? Math.max(0, Math.min(1, (5 - hud.horde) / 4)) : 0);
   const sfxRef = useRef(audio.play); sfxRef.current = audio.play;
   const stageRef = useRef<StageId>('city');
+  // rewarded revive: offered once per run when an ad is loaded; the run is recorded only after it is declined or used
+  const rewarded = useRewardedAd();
+  const adReadyRef = useRef(rewarded.ready); adReadyRef.current = rewarded.ready;
+  const [offer, setOffer] = useState(false);
+  const offerRef = useRef(offer); offerRef.current = offer;
+  const [adBusy, setAdBusy] = useState(false);
   const recordRef = useRef(progress.recordRun);
   recordRef.current = progress.recordRun;
 
@@ -209,13 +216,11 @@ export default function Game() {
         }
       }
       if (prev === 'dying' && s.mode === 'over') {
-        const dist = Math.floor(s.dist);
-        const stats = { turns: s.turnsTaken, jumps: s.jumps, slides: s.slides, pickups: s.pickupsRun };
-        const best = recordRef.current(dist, s.coinsRun, stats);
-        setToast(null);
-        setResult({ dist, coins: s.coinsRun, best, ...stats, cause: s.deathCause === 'walker' ? (WALKER_CAUSE[s.deathKind ?? 0] ?? WALKER_CAUSE[0]) : CAUSE[s.deathCause ?? 'gap'] });
-        setMode('over');
-        showOverlay();
+        if (canRevive(s) && adReadyRef.current) {
+          setToast(null); setOffer(true);
+          setMode('over');
+          showOverlay();
+        } else finishDeathRef.current();
       }
       if (s.mode === 'run' && now - hudAt > 100) {
         hudAt = now;
@@ -228,6 +233,34 @@ export default function Game() {
     raf = requestAnimationFrame(tick);
     return () => cancelAnimationFrame(raf);
   }, [showOverlay]);
+
+  const finishDeath = useCallback(() => {
+    const s = simRef.current;
+    if (s.mode !== 'over') return;
+    const dist = Math.floor(s.dist);
+    const stats = { turns: s.turnsTaken, jumps: s.jumps, slides: s.slides, pickups: s.pickupsRun };
+    const best = recordRef.current(dist, s.coinsRun, stats);
+    setOffer(false); setToast(null);
+    setResult({ dist, coins: s.coinsRun, best, ...stats, cause: s.deathCause === 'walker' ? (WALKER_CAUSE[s.deathKind ?? 0] ?? WALKER_CAUSE[0]) : CAUSE[s.deathCause ?? 'gap'] });
+    setMode('over');
+    showOverlay();
+  }, [showOverlay]);
+  const finishDeathRef = useRef(finishDeath); finishDeathRef.current = finishDeath;
+  const watchAd = useCallback(() => {
+    const s = simRef.current;
+    if (adBusy || !canRevive(s)) return;
+    setAdBusy(true);
+    rewarded.show().then((earned) => {
+      setAdBusy(false);
+      if (simRef.current !== s) return;
+      if (earned && revive(s)) {
+        setOffer(false);
+        resetClockRef.current = true;
+        setHud(hudOf(s)); setMode('run'); haptic('success');
+        setToast({ text: 'Back on your feet. The horde is pushed back. No more second chances this run.', tone: 'good', icon: 'heart', until: performance.now() + 2600 });
+      } else finishDeathRef.current();
+    });
+  }, [adBusy, rewarded.show]);
 
   const onSceneReady = useCallback((api: SceneApi | null) => {
     sceneRef.current = api;
@@ -276,7 +309,7 @@ export default function Game() {
     stageRef.current = 'city';
     audio.restartMusic();
     setHud(hudOf(simRef.current));
-    setResult(null);
+    setResult(null); setOffer(false);
     setHelp(false); setVault(false);
     setMode('run');
     haptic('success');
@@ -385,7 +418,7 @@ export default function Game() {
     endCutRef.current(true);
     simRef.current = freshSim('home');
     completionRef.current = null; setCompletion(null); setPhase('none');
-    setResult(null); setToast(null);
+    setResult(null); setToast(null); setOffer(false);
     setMenu(to);
     setMode('home');
     showOverlay();
@@ -412,6 +445,7 @@ export default function Game() {
       if (vaultRef.current) { setVault(false); return true; }
       const m = simRef.current.mode;
       if (m === 'run') { keyRef.current.pause(); return true; }
+      if (m === 'over' && offerRef.current) { finishDeathRef.current(); return true; }
       if (m === 'paused' || m === 'complete' || m === 'dying') return true;
       if (m === 'home' && menuRef.current === 'campaign') { setMenu('chooser'); return true; }
       if (m === 'home' && menuRef.current === 'chooser') { setMenu('home'); return true; }
@@ -625,6 +659,25 @@ export default function Game() {
                   <Feather name="archive" size={18} color={T.accent} /><Text style={styles.ghostText}>Trophies</Text>
                 </Pressable>
               </View>
+            </View>
+          </ScrollView>
+        </Animated.View>
+      )}
+
+      {mode === 'over' && offer && (
+        <Animated.View style={[StyleSheet.absoluteFill, styles.scrim, { opacity: fade, paddingTop: top, paddingBottom: bottom }]}>
+          <ScrollView contentContainerStyle={styles.scrollCenter} showsVerticalScrollIndicator={false}>
+            <View style={styles.panel} testID="revive-offer">
+              <Text style={[styles.kicker, { color: T.destructive }]}>CAUGHT</Text>
+              <Text style={styles.panelTitle}>Second chance?</Text>
+              <Text style={styles.panelSub}>Watch a short ad to get back up at {Math.floor(simRef.current.dist)} m with the horde pushed back. One per run.</Text>
+              <Pressable testID="revive-watch" disabled={adBusy} onPress={watchAd} style={({ pressed }) => [styles.cta, pressed && styles.pressed, adBusy && { opacity: 0.5 }]}>
+                <Feather name="play-circle" size={22} color={T.primaryForeground} />
+                <Text style={styles.ctaText}>{adBusy ? 'LOADING' : 'CONTINUE'}</Text>
+              </Pressable>
+              <Pressable testID="revive-skip" disabled={adBusy} onPress={finishDeath} style={({ pressed }) => [styles.ghost, pressed && styles.pressed]}>
+                <Feather name="x" size={18} color={T.accent} /><Text style={styles.ghostText}>No thanks</Text>
+              </Pressable>
             </View>
           </ScrollView>
         </Animated.View>

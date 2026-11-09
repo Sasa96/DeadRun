@@ -8,7 +8,11 @@
     "scheme": "relic-rush",
     "userInterfaceStyle": "automatic",
     "ios": {
-      "supportsTablet": false
+      "supportsTablet": false,
+      "bundleIdentifier": "com.fairsmith.deadrun",
+      "infoPlist": {
+        "ITSAppUsesNonExemptEncryption": false
+      }
     },
     "android": {},
     "web": {
@@ -38,7 +42,20 @@
           "recordAudioAndroid": false
         }
       ],
-      "expo-asset"
+      "expo-asset",
+      [
+        "react-native-google-mobile-ads",
+        {
+          "iosAppId": "ca-app-pub-5460578244337908~5555458789",
+          "androidAppId": "ca-app-pub-3940256099942544~3347511713"
+        }
+      ],
+      [
+        "expo-tracking-transparency",
+        {
+          "userTrackingPermission": "Dead Run uses this to show ads that are more relevant to you. The game works the same either way."
+        }
+      ]
     ],
     "experiments": {
       "typedRoutes": true,

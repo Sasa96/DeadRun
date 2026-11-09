@@ -22,7 +22,7 @@ const T = colors.light;
 type Act = 'left' | 'right' | 'jump' | 'slide';
 type Ctl = 'tilt' | 'touch';
 interface HudTurn { dir: TurnDir; dist: number; open: boolean; armed: -1 | 0 | 1; branch: boolean }
-interface Hud { dist: number; coins: number; speed: number; turn: HudTurn | null; stage: StageId; stageName: string; stageProg: number; next: StageId; toNext: number; tier: number; threat: string; horde: number; shield: number; flashlight: number; distraction: number; route: string; routeId: string; mission: MissionHudData | null }
+interface Hud { dist: number; coins: number; speed: number; turn: HudTurn | null; stage: StageId; stageName: string; stageProg: number; next: StageId; toNext: number; tier: number; threat: string; overdrive: number; horde: number; shield: number; flashlight: number; distraction: number; route: string; routeId: string; mission: MissionHudData | null }
 function hudOf(s: Sim): Hud {
   const ti = turnInfo(s);
   const st = stageInfo(s.dist);
@@ -35,7 +35,7 @@ function hudOf(s: Sim): Hud {
     mission = { id: c.id, title: m.title, objective: missionObjective(c, s.dist), section: missionSection(c, s.dist).name, item: m.item, itemName: m.itemName, collected: c.collected,
       recovering: c.recoveries > 0 && !c.collected, progress: Math.max(0, Math.min(1, s.dist / Math.max(1, c.finish))), activating: c.activationT > 0 };
   }
-  return { mission, horde: s.horde, shield: s.shieldT, flashlight: s.flashlightT, distraction: s.distractionT, route: rt.name, routeId: rt.id, tier: df.tier, threat: df.name, stage: st.id, stageName: st.name, stageProg: st.progress, next: st.next, toNext: Math.ceil(st.remaining), dist: Math.floor(s.dist), coins: s.coinsRun, speed: s.speed, turn: s.mode === 'run' && ti.warn ? { dir: ti.dir, dist: Math.max(0, Math.ceil(ti.dist)), open: ti.open, armed: ti.armed, branch: !!s.turn.branch } : null };
+  return { mission, horde: s.horde, shield: s.shieldT, flashlight: s.flashlightT, distraction: s.distractionT, route: rt.name, routeId: rt.id, tier: df.tier, threat: df.name, overdrive: df.overdrive, stage: st.id, stageName: st.name, stageProg: st.progress, next: st.next, toNext: Math.ceil(st.remaining), dist: Math.floor(s.dist), coins: s.coinsRun, speed: s.speed, turn: s.mode === 'run' && ti.warn ? { dir: ti.dir, dist: Math.max(0, Math.ceil(ti.dist)), open: ti.open, armed: ti.armed, branch: !!s.turn.branch } : null };
 }
 
 function haptic(kind: 'light' | 'heavy' | 'success') {
@@ -567,7 +567,7 @@ export default function Game() {
                   {hud.dist > progress.best ? 'NEW BEST' : `BEST ${progress.best} m · ${progress.best - hud.dist} m to go`}
                 </Text>
               )}
-              <Text style={[styles.threat, hud.tier >= 4 && { color: T.destructive }]} testID="threat">THREAT {hud.tier + 1} · {hud.threat.toUpperCase()}</Text>
+              <Text style={[styles.threat, hud.tier >= 4 && { color: T.destructive }]} testID="threat">THREAT {hud.tier + 1} · {hud.threat.toUpperCase()}{hud.overdrive > 0 ? ` +${hud.overdrive}` : ''}</Text>
               <View style={styles.speedTrack}><View style={[styles.speedFill, { width: `${Math.min(100, ((hud.speed - START_SPEED) / (MAX_SPEED - START_SPEED)) * 100)}%` }]} /></View>
             </View>
             <View style={styles.hudRight}>

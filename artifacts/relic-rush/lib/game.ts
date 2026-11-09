@@ -142,7 +142,10 @@ const GRAVITY = 30;
 const JUMP_V = 10.4;
 const SLIDE_TIME = 0.7;
 export const START_SPEED = 11;
-export const MAX_SPEED = 30;
+/** absolute speed ceiling, reached only deep into Last Stand overdrive */
+export const MAX_SPEED = 40;
+/** campaign missions and the Last Stand tier ladder top out here */
+export const CAMPAIGN_MAX_SPEED = 30;
 export const HORDE_REST = 5.5;
 const MAX_SUBSTEP = 1 / 120;
 /** rows are generated up to this far ahead and culled this far behind the runner */
@@ -172,21 +175,42 @@ export const GRACE_DIST = 180;
 export const TIER_LEN = 500;
 export const TIER_NAMES = ['Calm', 'Stirring', 'Restless', 'Hunting', 'Swarming', 'Frenzy', 'Dead Run'];
 export const MAX_TIER = TIER_NAMES.length - 1;
-/** speed ceiling per tier (m/s); final tier reaches MAX_SPEED */
+/** speed ceiling per tier (m/s); final tier reaches CAMPAIGN_MAX_SPEED */
 export const TIER_SPEED_CAP = [15.5, 18.5, 21, 23.5, 26, 28, 30];
+/**
+ * Last Stand overdrive: past the top tier (3,000 m) pressure keeps climbing every kilometre so a
+ * strong run cannot settle into a rhythm. +2 m/s per km up to MAX_SPEED (8,000 m); denser rows,
+ * more and faster infected, slower horde recovery and harsher stumbles, each capped to stay fair.
+ */
+export const OVERDRIVE_FROM = TIER_LEN * MAX_TIER;
+/** rows may pack up to this density in overdrive (1 = top of the tier ladder) */
+export const MAX_DENSITY = 1.4;
+/** metres per second the horde falls back while you run clean, and how far a stumble lets them close */
+export const HORDE_REGEN = 0.12;
+export const STUMBLE_PUSH = 3;
 /** minimum seconds between obstacle rows at current speed (> jump airtime 0.69s / slide 0.7s plus recovery) */
 export const MIN_ROW_TIME = 1.0;
-export interface Difficulty { tier: number; name: string; /** 0..1 within the tier ladder */ level: number; speedCap: number; density: number; grace: boolean; walkerChance: number; walkerVMax: number }
+export interface Difficulty {
+  tier: number; name: string; /** 0..1 within the tier ladder */ level: number; speedCap: number; density: number; grace: boolean; walkerChance: number; walkerVMax: number;
+  /** whole kilometres past the top tier in Last Stand (0 elsewhere) */
+  overdrive: number;
+  hordeRegen: number; stumblePush: number;
+}
 export function difficulty(dist: number): Difficulty {
   const d = Math.max(0, dist);
   const tier = Math.min(MAX_TIER, Math.floor(d / TIER_LEN));
   const level = Math.min(1, d / (TIER_LEN * MAX_TIER));
   const grace = d < GRACE_DIST;
+  const over = Math.max(0, (d - OVERDRIVE_FROM) / 1000);
   return {
-    tier, name: TIER_NAMES[tier], level, speedCap: TIER_SPEED_CAP[tier], grace,
-    density: grace ? 0 : level,
-    walkerChance: d < WALKER_START ? 0 : 0.18 + level * 0.24,
-    walkerVMax: 4.0 + level * 2.5,
+    tier, name: TIER_NAMES[tier], level, grace,
+    speedCap: over > 0 ? Math.min(MAX_SPEED, CAMPAIGN_MAX_SPEED + over * 2) : TIER_SPEED_CAP[tier],
+    density: grace ? 0 : level + Math.min(MAX_DENSITY - 1, over * 0.1),
+    walkerChance: d < WALKER_START ? 0 : 0.18 + level * 0.24 + Math.min(0.18, over * 0.04),
+    walkerVMax: 4.0 + level * 2.5 + Math.min(2.5, over * 0.5),
+    overdrive: Math.floor(over),
+    hordeRegen: HORDE_REGEN / (1 + Math.min(1, over * 0.25)),
+    stumblePush: STUMBLE_PUSH + Math.min(1.5, over * 0.3),
   };
 }
 /** Campaign pressure depends on mission AND local progress, not a repeated short Endless run.
@@ -200,10 +224,11 @@ export function simDifficulty(s: Sim, at = s.dist): Difficulty {
   const tier = Math.min(MAX_TIER, Math.floor(level * MAX_TIER));
   return {
     tier, name: TIER_NAMES[tier], level,
-    speedCap: Math.min(MAX_SPEED, 18.5 + (id - 1) * 1.2 + progress * 2),
+    speedCap: Math.min(CAMPAIGN_MAX_SPEED, 18.5 + (id - 1) * 1.2 + progress * 2),
     density: at < 90 ? 0 : level, grace: at < 90,
     walkerChance: at < WALKER_START ? 0 : 0.16 + level * 0.34,
     walkerVMax: 3.5 + level * 3.5,
+    overdrive: 0, hordeRegen: HORDE_REGEN, stumblePush: STUMBLE_PUSH,
   };
 }
 /** ramp speed toward the tier cap; never exceeds it */
@@ -214,7 +239,7 @@ export function nextSpeed(speed: number, dist: number, dt: number, cap = difficu
 /** distance between obstacle rows: tightens with density but never below MIN_ROW_TIME seconds of travel */
 export function rowSpacing(speed: number, density: number, r = 0.5) {
   // Scale by travel time: the old high-speed floor erased most density increases.
-  const base = speed * (1.95 - Math.max(0, Math.min(1, density)) * 0.7 + r * 0.25);
+  const base = speed * (1.95 - Math.max(0, Math.min(MAX_DENSITY, density)) * 0.7 + r * 0.25);
   return Math.max(base, speed * MIN_ROW_TIME + 4);
 }
 /** speed-scaled corner clear corridor and warning */
@@ -483,7 +508,7 @@ export function step(s: Sim, dt: number): { coin: boolean; died: boolean; turned
   s.phase += dt * (6 + s.speed * 0.45);
   s.px += (s.lane - s.px) * Math.min(1, dt * 14);
   // Clean running earns space; repeated mistakes before recovery let the horde catch up.
-  if (s.stumbleT <= 0) s.horde = Math.min(HORDE_REST + (s.distractionT > 0 ? 3 : 0), s.horde + dt * (s.distractionT > 0 ? 1.8 : 0.12));
+  if (s.stumbleT <= 0) s.horde = Math.min(HORDE_REST + (s.distractionT > 0 ? 3 : 0), s.horde + dt * (s.distractionT > 0 ? 1.8 : simDifficulty(s).hordeRegen));
   if (s.jy > 0 || s.vy > 0) {
     s.vy -= GRAVITY * dt;
     s.jy += s.vy * dt;
@@ -623,7 +648,7 @@ function absorbHit(s: Sim) {
     return true;
   }
   if (s.horde < 3.5) return false;
-  s.horde = Math.max(1, s.horde - 3);
+  s.horde = Math.max(1, s.horde - simDifficulty(s).stumblePush);
   s.stumbleT = 0.85; s.invulnerableT = 1.4; s.cleanTime = 0; s.shake = 0.3;
   return true;
 }

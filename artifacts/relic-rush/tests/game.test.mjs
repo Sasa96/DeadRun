@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { newSim, advance, requestTurn, stageAt, stageInfo, STAGE_LEN, setLane, canRevive, revive, REVIVE_CLEAR, newMissionSim, specialTypes, specialChance, lastStandTypes, lastStandChance } from '../lib/game.ts';
 import { lastStandUnlocked, LAST_STAND_UNLOCK } from '../lib/campaign.ts';
+import { simDifficulty as simDifficultyOf } from '../lib/game.ts';
 import { newIntro, stepIntro, skipIntro, introShot, INTRO_LEN } from '../lib/intro.ts';
 import { tiltLane } from '../lib/tilt.ts';
 
@@ -102,7 +103,7 @@ test('tilt remains continuous and retry resets every new mechanic', () => {
 });
 
 // ---- difficulty progression ----
-import { difficulty, nextSpeed, rowSpacing, clearBefore, turnWarn, GRACE_DIST, MIN_ROW_TIME, MAX_SPEED, START_SPEED, MAX_TIER, TURN_WARN, CLEAR_BEFORE, CLEAR_AFTER, WALKER_START } from '../lib/game.ts';
+import { difficulty, nextSpeed, rowSpacing, clearBefore, turnWarn, GRACE_DIST, MIN_ROW_TIME, MAX_SPEED, START_SPEED, MAX_TIER, TURN_WARN, CLEAR_BEFORE, CLEAR_AFTER, WALKER_START, CAMPAIGN_MAX_SPEED, MAX_DENSITY, OVERDRIVE_FROM, HORDE_REGEN, STUMBLE_PUSH } from '../lib/game.ts';
 
 function seeded(seed) { let x = seed >>> 0; return () => { x = (x * 1664525 + 1013904223) >>> 0; return x / 4294967296; }; }
 function withSeed(seed, fn) { const r = Math.random; Math.random = seeded(seed); try { return fn(); } finally { Math.random = r; } }
@@ -112,7 +113,7 @@ test('difficulty tiers rise monotonically with distance and cap', () => {
   for (let d = 0; d <= 10000; d += 50) {
     const df = difficulty(d);
     assert.ok(df.tier >= prev); assert.ok(df.speedCap >= prevCap);
-    assert.ok(df.speedCap <= MAX_SPEED); assert.ok(df.density >= 0 && df.density <= 1);
+    assert.ok(df.speedCap <= MAX_SPEED); assert.ok(df.density >= 0 && df.density <= MAX_DENSITY);
     prev = df.tier; prevCap = df.speedCap;
   }
   assert.equal(difficulty(10000).tier, MAX_TIER);
@@ -140,7 +141,7 @@ test('opening grace: single-lane obstacles only, no walkers', () => {
   });
 });
 test('rows keep minimum temporal spacing at every speed and density', () => {
-  for (let v = START_SPEED; v <= MAX_SPEED; v += 0.5) for (const dens of [0, 0.5, 1]) for (const r of [0, 1])
+  for (let v = START_SPEED; v <= MAX_SPEED; v += 0.5) for (const dens of [0, 0.5, 1, MAX_DENSITY]) for (const r of [0, 1])
     assert.ok(rowSpacing(v, dens, r) / v >= MIN_ROW_TIME, `v=${v}`);
   for (let seed = 1; seed < 15; seed++) withSeed(seed, () => {
     const s = newSim('run'); s.dist = 4000; s.speed = MAX_SPEED; s.nextS = 4020; s.turn = { id: 9, s: 1e6, dir: 1 };
@@ -415,4 +416,42 @@ test('Last Stand unlocks only after mission 5 is reached', () => {
   assert.equal(LAST_STAND_UNLOCK, 5);
   assert.equal(lastStandUnlocked({ completed: [1, 2, 3, 4], bestTimes: {} }), false);
   assert.equal(lastStandUnlocked({ completed: [1, 2, 3, 4, 5], bestTimes: {} }), true);
+});
+
+test('Last Stand keeps getting harder past 3 km until capped, top speed 40 m/s', () => {
+  assert.equal(OVERDRIVE_FROM, 3000);
+  assert.equal(difficulty(3000).speedCap, CAMPAIGN_MAX_SPEED);
+  assert.equal(difficulty(3000).overdrive, 0);
+  assert.equal(difficulty(5000).speedCap, 34);
+  assert.equal(difficulty(5000).overdrive, 2);
+  assert.equal(difficulty(8000).speedCap, MAX_SPEED);
+  assert.equal(MAX_SPEED, 40);
+  let prev = difficulty(OVERDRIVE_FROM);
+  for (let d = OVERDRIVE_FROM + 500; d <= 7000; d += 500) {
+    const df = difficulty(d);
+    assert(df.speedCap > prev.speedCap && df.density > prev.density && df.walkerChance > prev.walkerChance && df.walkerVMax > prev.walkerVMax);
+    assert(df.hordeRegen < prev.hordeRegen && df.stumblePush > prev.stumblePush);
+    prev = df;
+  }
+  // everything levels off: still beatable, never unbounded
+  const far = difficulty(1e6);
+  assert.equal(far.density, MAX_DENSITY);
+  assert(far.walkerChance <= 0.6 && far.walkerVMax <= 9 && far.hordeRegen >= HORDE_REGEN / 2 && far.stumblePush <= STUMBLE_PUSH + 1.5);
+  assert(rowSpacing(MAX_SPEED, far.density, 0) / MAX_SPEED >= MIN_ROW_TIME);
+  // campaign never exceeds its own cap and has no overdrive
+  for (let id = 1; id <= 10; id++) {
+    const m = newMissionSim(id);
+    assert(simDifficultyOf(m, 5000).speedCap <= CAMPAIGN_MAX_SPEED);
+    assert.equal(simDifficultyOf(m, 5000).overdrive, 0);
+  }
+});
+test('a stumble deep in Last Stand lets the horde closer than early on', () => {
+  const early = newSim('run'); early.dist = 1000; early.horde = 5.5; early.turn = { id: 9, s: 1e6, dir: 1 }; early.nextS = 1e9;
+  early.walkers = [{ id: 1, s: early.dist + 0.3, lane: 0, v: 3, kind: 0, type: 'walker' }];
+  advance(early, 0.02);
+  const late = newSim('run'); late.dist = 8000; late.speed = 30; late.horde = 5.5; late.turn = { id: 9, s: 1e6, dir: 1 }; late.nextS = 1e9;
+  late.walkers = [{ id: 1, s: late.dist + 0.3, lane: 0, v: 3, kind: 0, type: 'walker' }];
+  advance(late, 0.02);
+  assert.equal(early.mode, 'run'); assert.equal(late.mode, 'run');
+  assert(late.horde < early.horde);
 });

@@ -169,14 +169,14 @@ export function simDifficulty(s: Sim, at = s.dist): Difficulty {
   const id = s.campaign.id;
   // Use the authored length: missing an item must not reduce pressure by extending the goal.
   const progress = Math.max(0, Math.min(1, at / missionById(id).finish));
-  const level = Math.min(1, (id - 1) * 0.075 + progress * 0.30);
+  const level = Math.min(1, 0.05 + (id - 1) * 0.09 + progress * 0.15);
   const tier = Math.min(MAX_TIER, Math.floor(level * MAX_TIER));
   return {
     tier, name: TIER_NAMES[tier], level,
-    speedCap: Math.min(MAX_SPEED, 17.5 + (id - 1) * 1.25 + progress * 2),
+    speedCap: Math.min(MAX_SPEED, 18.5 + (id - 1) * 1.2 + progress * 2),
     density: at < 90 ? 0 : level, grace: at < 90,
-    walkerChance: at < WALKER_START ? 0 : 0.14 + level * 0.28,
-    walkerVMax: 3.5 + level * 3,
+    walkerChance: at < WALKER_START ? 0 : 0.16 + level * 0.34,
+    walkerVMax: 3.5 + level * 3.5,
   };
 }
 /** ramp speed toward the tier cap; never exceeds it */
@@ -250,7 +250,7 @@ export function newSim(mode: Mode = 'home'): Sim {
 export function newMissionSim(id: number): Sim {
   const s = baseSim('run');
   s.campaign = newCampaignRun(id);
-  s.speed = START_SPEED + (id - 1) * 0.85;
+  s.speed = START_SPEED + (id - 1) * 1.1;
   s.turn = campaignJunction(s, 0);
   return s;
 }
@@ -342,7 +342,8 @@ function spawnRow(s: Sim) {
   const J = s.turn.s;
   if (at + 6 > J - clearBefore(s.speed) && at - 8 < J + CLEAR_AFTER) { s.nextS = J + CLEAR_AFTER + 8; return; }
   const df = simDifficulty(s, at);
-  const diff = c?.id === 4 && c.routeChoice === -1 ? 0 : df.density;
+  // The safer detour halves pressure only on the detour itself.
+  const diff = c?.id === 4 && c.routeChoice === -1 && at >= 550 && at < 1250 ? df.density * 0.5 : df.density;
   // Keep moving infected away from interactions too, accounting for their spawn offset.
   const walkerSafe = !c || ((!c.collected ? Math.abs(at - c.itemAt) > 120 : true) && Math.abs(at - (missionById(c.id).activationAt ?? -Infinity)) > 120 && at < c.finish - 120);
   if (at > WALKER_START && walkerSafe && Math.random() < df.walkerChance && spawnWalkers(s, at)) {

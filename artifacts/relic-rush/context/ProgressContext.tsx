@@ -36,10 +36,16 @@ export function ProgressProvider({ children }: { children: React.ReactNode }) {
       .then((raw) => {
         if (!alive) return;
         if (raw) {
-          const j = JSON.parse(raw) as Partial<Progress>;
-          const saved = normalizeProgress(j);
-          progressRef.current = saved;
-          setP(saved);
+          let j: unknown = null;
+          try { j = JSON.parse(raw); } catch {}
+          if (j && typeof j === 'object') {
+            const saved = normalizeProgress(j as Partial<Progress>);
+            progressRef.current = saved;
+            setP(saved);
+          } else {
+            // Unreadable save: keep a copy for recovery and start fresh rather than locking the game.
+            AsyncStorage.setItem(`${KEY}/corrupt`, raw).catch(() => {});
+          }
         }
         setError(null);
         loadedRef.current = true;

@@ -5,13 +5,14 @@
   },
   "build": {
     "production": {
-      "autoIncrement": true,
-      "env": {
-        "EXPO_PUBLIC_ADS_TEST": "1"
-      }
+      "autoIncrement": true
     }
   },
   "submit": {
-    "production": {}
+    "production": {
+      "ios": {
+        "ascAppId": "6832399679"
+      }
+    }
   }
 }

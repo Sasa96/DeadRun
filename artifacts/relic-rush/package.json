@@ -62,7 +62,6 @@
     "react": "19.3.0",
     "react-native": "0.88.1",
     "react-native-google-mobile-ads": "^17.4.0",
-    "react-native-purchases": "10.16.0",
     "three": "^0.162.0"
   }
 }

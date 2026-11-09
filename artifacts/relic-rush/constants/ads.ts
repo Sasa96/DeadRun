@@ -9,5 +9,5 @@ export const ADMOB_UNITS = {
 };
 
 /** Serve Google test ads: always in development, and in any build made with EXPO_PUBLIC_ADS_TEST=1
- * (eas.json sets it for TestFlight builds so testers never click live ads). */
+ * (add it to an eas.json build profile's env for builds whose testers must never see live ads). */
 export const USE_TEST_ADS = __DEV__ || process.env.EXPO_PUBLIC_ADS_TEST === '1';

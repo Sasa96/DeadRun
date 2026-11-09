@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { newSim, advance, requestTurn, stageAt, stageInfo, STAGE_LEN, setLane, canRevive, revive, REVIVE_CLEAR, newMissionSim, specialTypes, specialChance } from '../lib/game.ts';
+import { newSim, advance, requestTurn, stageAt, stageInfo, STAGE_LEN, setLane, canRevive, revive, REVIVE_CLEAR, newMissionSim, specialTypes, specialChance, lastStandTypes, lastStandChance } from '../lib/game.ts';
+import { lastStandUnlocked, LAST_STAND_UNLOCK } from '../lib/campaign.ts';
 import { newIntro, stepIntro, skipIntro, introShot, INTRO_LEN } from '../lib/intro.ts';
 import { tiltLane } from '../lib/tilt.ts';
 
@@ -358,7 +359,7 @@ test('revive resumes once: clears the threat ahead, takes a missed corner, keeps
   assert.equal(revive(newSim('run')), false);
 });
 
-test('special infected unlock one per mission and never appear in mission 1 or endless', () => {
+test('special infected unlock one per mission; Last Stand adds them by distance', () => {
   assert.deepEqual(specialTypes(null), []);
   assert.deepEqual(specialTypes(1), []);
   assert.deepEqual(specialTypes(2), ['crawler']);
@@ -367,8 +368,16 @@ test('special infected unlock one per mission and never appear in mission 1 or e
   assert.deepEqual(specialTypes(10), ['crawler', 'sprinter', 'brute']);
   assert.equal(specialChance(1), 0);
   assert(specialChance(3) > specialChance(2) && specialChance(10) <= 0.6);
+  assert.deepEqual(lastStandTypes(0), []);
+  assert.deepEqual(lastStandTypes(799), []);
+  assert.deepEqual(lastStandTypes(800), ['crawler']);
+  assert.deepEqual(lastStandTypes(1600), ['crawler', 'sprinter']);
+  assert.deepEqual(lastStandTypes(5000), ['crawler', 'sprinter', 'brute']);
+  assert.equal(lastStandChance(500), 0);
+  assert(lastStandChance(800) > 0 && lastStandChance(20000) <= 0.5);
+  // the opening stretch of Last Stand stays plain
   const endless = newSim('run');
-  for (let i = 0; i < 4000 && endless.mode === 'run'; i++) { endless.horde = 99; endless.invulnerableT = 1; endless.obstacles = endless.obstacles.filter((o) => o.type !== 'gap'); requestTurn(endless, endless.turn.dir); advance(endless, 1 / 30); }
+  for (let i = 0; i < 4000 && endless.mode === 'run' && endless.dist < 700; i++) { endless.horde = 99; endless.invulnerableT = 1; endless.obstacles = endless.obstacles.filter((o) => o.type !== 'gap'); requestTurn(endless, endless.turn.dir); advance(endless, 1 / 30); }
   assert(endless.walkers.every((w) => w.type === 'walker'));
   // later missions actually spawn them, and every row still leaves a lane open
   const seen = new Set();
@@ -379,7 +388,7 @@ test('special infected unlock one per mission and never appear in mission 1 or e
       m.horde = 99; m.invulnerableT = 1; m.obstacles = m.obstacles.filter((o) => o.type !== 'gap');
       requestTurn(m, m.turn.dir); advance(m, 1 / 30);
       for (const w of m.walkers) {
-        seen.add(w.type);
+        if (w.type !== 'walker') seen.add(w.type);
         if (w.type === 'brute') assert(Math.abs(w.lane) === 0.5);
       }
     }
@@ -400,4 +409,10 @@ test('crawlers are jumped, brutes block two lanes and cannot be jumped', () => {
   jumpBrute.walkers = [{ id: 1, s: 0.3, lane: 0.5, v: 2, kind: 0, type: 'brute' }];
   advance(jumpBrute, 0.05);
   assert.equal(jumpBrute.deathWalker, 'brute');
+});
+
+test('Last Stand unlocks only after mission 5 is reached', () => {
+  assert.equal(LAST_STAND_UNLOCK, 5);
+  assert.equal(lastStandUnlocked({ completed: [1, 2, 3, 4], bestTimes: {} }), false);
+  assert.equal(lastStandUnlocked({ completed: [1, 2, 3, 4, 5], bestTimes: {} }), true);
 });

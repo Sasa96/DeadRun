@@ -37,7 +37,7 @@ export const CRAWLER_HALF_D = 0.6;
 export const CRAWLER_CLEAR = 0.5;
 /** An infected walking straight toward the runner along its fixed lane. `s` decreases at `v` m/s. */
 export interface Walker { id: number; s: number; lane: number; v: number; kind: number; type: WalkerType }
-/** Special infected introduced one per mission: crawlers in 2, sprinters in 3, brutes from 4. Mission 1 and endless keep plain walkers. */
+/** Special infected introduced one per mission: crawlers in 2, sprinters in 3, brutes from 4. Mission 1 keeps plain walkers. */
 export function specialTypes(missionId: number | null | undefined): WalkerType[] {
   if (!missionId || missionId < 2) return [];
   return (['crawler', 'sprinter', 'brute'] as WalkerType[]).slice(0, Math.min(3, missionId - 1));
@@ -46,6 +46,10 @@ export function specialTypes(missionId: number | null | undefined): WalkerType[]
 export function specialChance(missionId: number | null | undefined) {
   return !missionId || missionId < 2 ? 0 : Math.min(0.6, 0.3 + (missionId - 2) * 0.04);
 }
+/** Last Stand (endless) brings them in by distance instead: crawlers, then sprinters, then brutes. */
+export const LAST_STAND_SPECIALS: [WalkerType, number][] = [['crawler', 800], ['sprinter', 1600], ['brute', 2500]];
+export function lastStandTypes(at: number): WalkerType[] { return LAST_STAND_SPECIALS.filter(([, from]) => at >= from).map(([t]) => t); }
+export function lastStandChance(at: number) { return at < 800 ? 0 : Math.min(0.5, 0.25 + (at - 800) / 12800); }
 
 export function stageAt(dist: number): StageId { return STAGES[((Math.floor(Math.max(0, dist) / STAGE_LEN) % 3) + 3) % 3]; }
 export interface StageInfo { id: StageId; name: string; cycle: number; progress: number; remaining: number; next: StageId }
@@ -331,8 +335,9 @@ function spawnWalkers(s: Sim, at: number) {
   const kinds = STAGE_KINDS[simStageAt(s, at)];
   if (s.walkers.length >= WALKER_MAX) return false;
   const df = simDifficulty(s, at);
-  const specials = specialTypes(s.campaign?.id);
-  const special: WalkerType | null = specials.length && Math.random() < specialChance(s.campaign?.id) ? specials[Math.floor(Math.random() * specials.length)] : null;
+  const specials = s.campaign ? specialTypes(s.campaign.id) : lastStandTypes(at);
+  const chance = s.campaign ? specialChance(s.campaign.id) : lastStandChance(at);
+  const special: WalkerType | null = specials.length && Math.random() < chance ? specials[Math.floor(Math.random() * specials.length)] : null;
   // A brute fills two lanes, so it always walks alone, centred on a lane boundary.
   const count = special === 'brute' ? 1 : Math.random() < 0.12 + df.density * 0.45 ? 2 : 1;
   const lanes = special === 'brute' ? [Math.random() < 0.5 ? -0.5 : 0.5] : [-1, 0, 1].sort(() => Math.random() - 0.5).slice(0, Math.min(count, WALKER_MAX - s.walkers.length));

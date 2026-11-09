@@ -4,7 +4,7 @@ import React, { useEffect, useState } from 'react';
 import { Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 import { Feather, MaterialCommunityIcons } from '@expo/vector-icons';
 import colors from '@/constants/colors';
-import { MISSIONS, missionUnlocked, type CampaignProgress, type MissionDefinition } from '@/lib/campaign';
+import { LAST_STAND_UNLOCK, MISSIONS, missionUnlocked, type CampaignProgress, type MissionDefinition } from '@/lib/campaign';
 import { cutsceneLength, cutsceneLine, SCENE_KICKER } from '@/components/campaignMeta';
 
 const T = colors.light;
@@ -15,8 +15,8 @@ const ITEM_ICON: Record<string, React.ComponentProps<typeof MaterialCommunityIco
 export const fmtTime = (s: number) => `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, '0')}`;
 
 // ---------- mode chooser ----------
-export function ModeChooser({ top, bottom, best, done, onEscape, onEndless, onBack }: {
-  top: number; bottom: number; best: number; done: number; onEscape: () => void; onEndless: () => void; onBack: () => void;
+export function ModeChooser({ top, bottom, best, done, lastStand, onEscape, onEndless, onBack }: {
+  top: number; bottom: number; best: number; done: number; lastStand: boolean; onEscape: () => void; onEndless: () => void; onBack: () => void;
 }) {
   return (
     <View style={[StyleSheet.absoluteFill, s.scrim, { paddingTop: top + 8, paddingBottom: bottom + 12 }]} testID="mode-chooser">
@@ -32,13 +32,15 @@ export function ModeChooser({ top, bottom, best, done, onEscape, onEndless, onBa
           <Text style={s.modeBody}>Ten places between your front door and the last boat out. Find what each one needs, then get there alive.</Text>
           <View style={s.track}><View style={[s.trackFill, { width: `${done * 10}%` }]} /></View>
         </Pressable>
-        <Pressable testID="mode-endless" onPress={onEndless} style={({ pressed }) => [s.modeCard, pressed && s.pressed]}>
+        <Pressable testID="mode-endless" disabled={!lastStand} accessibilityState={{ disabled: !lastStand }} onPress={onEndless} style={({ pressed }) => [s.modeCard, !lastStand && { opacity: 0.5 }, pressed && s.pressed]}>
           <View style={s.modeTop}>
-            <MaterialCommunityIcons name="infinity" size={28} color={T.accent} />
-            <Text style={[s.modeTag, { color: T.mutedForeground }]}>BEST {best} M</Text>
+            {lastStand ? <MaterialCommunityIcons name="infinity" size={28} color={T.accent} /> : <Feather name="lock" size={24} color={T.mutedForeground} />}
+            <Text style={[s.modeTag, { color: T.mutedForeground }]}>{lastStand ? `BEST ${best} M` : `UNLOCKS AFTER MISSION ${LAST_STAND_UNLOCK}`}</Text>
           </View>
-          <Text style={[s.modeTitle, { color: T.foreground }]}>ENDLESS</Text>
-          <Text style={[s.modeBody, { color: T.mutedForeground }]}>No destination. City, precinct, hospital, again. Run until they catch you.</Text>
+          <Text style={[s.modeTitle, { color: T.foreground }]}>LAST STAND</Text>
+          <Text style={[s.modeBody, { color: T.mutedForeground }]}>{lastStand
+            ? 'No destination. City, precinct, hospital, again. Crawlers, sprinters and brutes join the horde the further you get. Run until they catch you.'
+            : `Reach ${MISSIONS[LAST_STAND_UNLOCK - 1].destination.toLowerCase()} in the escape to open endless survival.`}</Text>
         </Pressable>
       </ScrollView>
     </View>
@@ -211,6 +213,9 @@ export function MissionSuccess({ top, bottom, m, seconds, best, coins, hasNext, 
           <Text style={[s.kicker, { color: T.accent }]}>{finale ? 'ESCAPED THE CITY' : `MISSION ${m.id} COMPLETE`}</Text>
           <Text style={s.panelTitle}>{m.destination}</Text>
           <Text style={s.panelSub}>{m.completion[2]}</Text>
+          {m.id === LAST_STAND_UNLOCK && (
+            <View style={s.unlock} testID="last-stand-unlocked"><MaterialCommunityIcons name="infinity" size={16} color={T.accent} /><Text style={s.unlockText}>LAST STAND UNLOCKED: endless survival is open from the mode menu.</Text></View>
+          )}
           <View style={s.resRow}>
             <View style={s.resCell}><Text style={s.resVal}>{fmtTime(seconds)}</Text><Text style={s.resLab}>TIME</Text></View>
             <View style={s.resDiv} />
@@ -310,6 +315,8 @@ const s = StyleSheet.create({
   panel: { width: '100%', maxWidth: 440, alignSelf: 'center', padding: 22, borderRadius: colors.radius, backgroundColor: T.card, borderWidth: 1, borderColor: T.border, gap: 12 },
   panelTitle: { fontFamily: F.b, fontSize: 26, color: T.foreground, letterSpacing: 0.5 },
   panelSub: { fontFamily: F.r, fontSize: 14, lineHeight: 20, color: T.mutedForeground },
+  unlock: { flexDirection: 'row', alignItems: 'center', gap: 8, marginTop: 12, paddingVertical: 10, paddingHorizontal: 12, borderRadius: 12, borderWidth: 1, borderColor: T.accent },
+  unlockText: { flex: 1, fontFamily: F.s, fontSize: 12, letterSpacing: 0.6, color: T.accent },
   saveBar: { height: 3, borderRadius: 2, backgroundColor: T.border, overflow: 'hidden' },
   saveFill: { width: '60%', height: 3, backgroundColor: T.accent },
   resRow: { flexDirection: 'row', alignItems: 'center', paddingVertical: 12, borderRadius: 12, backgroundColor: T.glass, borderWidth: 1, borderColor: T.border },

@@ -82,6 +82,9 @@ export function normalizeCampaign(raw?: Partial<CampaignProgress>): CampaignProg
   }
   return { completed, bestTimes };
 }
+/** Last Stand (endless survival) opens once this mission's destination is reached. */
+export const LAST_STAND_UNLOCK = 5;
+export function lastStandUnlocked(p: CampaignProgress) { return p.completed.includes(LAST_STAND_UNLOCK); }
 export function missionUnlocked(p: CampaignProgress, id: number) {
   return Number.isInteger(id) && id >= 1 && id <= 10 && (id === 1 || p.completed.includes(id - 1));
 }

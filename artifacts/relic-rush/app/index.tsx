@@ -16,7 +16,7 @@ import { HordeMeter, POWER, PowerChips, SensitivityRow, Toast, type PowerType } 
 import { TrophyMenu, TrophyReveal } from '@/components/TrophyMenu';
 import { CampaignMap, CutsceneOverlay, MissionHud, MissionSaveError, MissionSaving, MissionSuccess, ModeChooser, type MissionHudData } from '@/components/CampaignUI';
 import { cutsceneLength } from '@/components/campaignMeta';
-import { missionById, missionObjective, missionSection, missionUnlocked } from '@/lib/campaign';
+import { lastStandUnlocked, missionById, missionObjective, missionSection, missionUnlocked } from '@/lib/campaign';
 
 const T = colors.light;
 type Act = 'left' | 'right' | 'jump' | 'slide';
@@ -104,7 +104,9 @@ export default function Game() {
   const [cut, setCut] = useState<{ id: number; t: number; replay: boolean } | null>(null);
   const completeRef = useRef(progress.completeMission); completeRef.current = progress.completeMission;
   const campaignRef = useRef(progress.campaign); campaignRef.current = progress.campaign;
-  const lastRecRef = useRef(0); const lastActRef = useRef(false); const seenSpecialRef = useRef(new Set<WalkerType>());
+  const lastRecRef = useRef(0); const lastActRef = useRef(false); const seenSpecialRef = useRef(new Set<WalkerType>()); const bestRef = useRef(0); const passedBestRef = useRef(false);
+  bestRef.current = progress.best;
+  const lastStandRef = useRef(false); lastStandRef.current = lastStandUnlocked(progress.campaign);
   const sceneRef = useRef<SceneApi | null>(null);
   const appActiveRef = useRef(AppState.currentState === 'active');
   const [sceneReady, setSceneReady] = useState(false);
@@ -225,6 +227,10 @@ export default function Game() {
           seenSpecialRef.current.add(w.type); haptic('heavy');
           toastRef.current({ text: SPECIAL_WARN[w.type], tone: 'warn', icon: 'alert-octagon', until: now + 2800 });
         }
+        if (!s.campaign && !passedBestRef.current && bestRef.current > 0 && s.dist > bestRef.current) {
+          passedBestRef.current = true; haptic('success'); sfxRef.current('stage');
+          toastRef.current({ text: `New best! Past ${bestRef.current} m. Every metre now is a record.`, tone: 'good', icon: 'award', until: now + 2600 });
+        }
         if (ev.completed) completeOnceRef.current();
         if (s.mode === 'run') {
           const sid = simStageAt(s, s.dist);
@@ -317,7 +323,7 @@ export default function Game() {
     if (!sceneRef.current || !progressLoadedRef.current) return;
     endCutRef.current(true);
     simRef.current = freshSim('run');
-    lastRecRef.current = 0; lastActRef.current = false; seenSpecialRef.current.clear();
+    lastRecRef.current = 0; lastActRef.current = false; seenSpecialRef.current.clear(); passedBestRef.current = false;
     completionRef.current = null; setCompletion(null); setPhase('none'); setSaveBusy(false);
     setActiveMission(missionRef.current);
     setMenu('home');
@@ -353,9 +359,9 @@ export default function Game() {
     setIntroT(0); setHelp(false); setMenu('home'); setIntroOn(true);
   }, []);
   const skip = useCallback(() => { if (skipIntro(introRef.current)) finishIntro(); }, [finishIntro]);
-  // Endless: previous behaviour (intro on first run per session)
+  // Last Stand (endless): unlocked after mission 5; intro on first run per session
   const startEndless = useCallback(() => {
-    if (!progressLoadedRef.current) return;
+    if (!progressLoadedRef.current || !lastStandRef.current) return;
     missionRef.current = null;
     if (!introSeenRef.current) { audio.restartMusic(); audio.pauseNow(); playIntro(null); } else startRun();
   }, [playIntro, startRun, audio.restartMusic, audio.pauseNow]);
@@ -556,6 +562,11 @@ export default function Game() {
             <View style={styles.hudCard} pointerEvents="none">
               <Text style={styles.hudLabel}>DISTANCE</Text>
               <Text style={styles.hudBig}>{hud.dist}<Text style={styles.hudUnit}> m</Text></Text>
+              {!activeMission && progress.best > 0 && (
+                <Text style={[styles.hudBest, hud.dist > progress.best && { color: T.accent }]} testID="hud-best">
+                  {hud.dist > progress.best ? 'NEW BEST' : `BEST ${progress.best} m · ${progress.best - hud.dist} m to go`}
+                </Text>
+              )}
               <Text style={[styles.threat, hud.tier >= 4 && { color: T.destructive }]} testID="threat">THREAT {hud.tier + 1} · {hud.threat.toUpperCase()}</Text>
               <View style={styles.speedTrack}><View style={[styles.speedFill, { width: `${Math.min(100, ((hud.speed - START_SPEED) / (MAX_SPEED - START_SPEED)) * 100)}%` }]} /></View>
             </View>
@@ -749,7 +760,7 @@ export default function Game() {
       )}
 
       {mode === 'home' && !introOn && !cut && menu === 'chooser' && (
-        <ModeChooser top={top} bottom={bottom} best={progress.best} done={progress.campaign.completed.length}
+        <ModeChooser top={top} bottom={bottom} best={progress.best} done={progress.campaign.completed.length} lastStand={lastStandUnlocked(progress.campaign)}
           onBack={() => setMenu('home')} onEndless={startEndless} onEscape={() => setMenu('campaign')} />
       )}
       {mode === 'home' && !introOn && !cut && menu === 'campaign' && (
@@ -979,6 +990,7 @@ const styles = StyleSheet.create({
   hud: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-start', paddingHorizontal: 16 },
   hudCard: { backgroundColor: T.glass, paddingHorizontal: 14, paddingVertical: 8, borderRadius: colors.radius, borderLeftWidth: 3, borderLeftColor: T.primary },
   hudLabel: { fontFamily: F.s, fontSize: 10, letterSpacing: 2.5, color: T.mutedForeground },
+  hudBest: { fontFamily: F.s, fontSize: 10, letterSpacing: 1.2, color: T.mutedForeground, marginTop: 2 },
   hudBig: { fontFamily: F.b, fontSize: 36, color: T.foreground, letterSpacing: -1, fontVariant: ['tabular-nums'] },
   hudUnit: { fontFamily: F.m, fontSize: 16, color: T.mutedForeground },
   speedTrack: { width: 110, height: 3, backgroundColor: T.border, borderRadius: 2, overflow: 'hidden', marginTop: 4 },

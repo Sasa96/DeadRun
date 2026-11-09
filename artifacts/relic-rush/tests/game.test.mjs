@@ -455,3 +455,17 @@ test('a stumble deep in Last Stand lets the horde closer than early on', () => {
   assert.equal(early.mode, 'run'); assert.equal(late.mode, 'run');
   assert(late.horde < early.horde);
 });
+
+test('Last Stand best is tracked separately; campaign runs only count toward trophies', () => {
+  let p = normalizeProgress({});
+  assert.equal(p.lastStandBest, 0);
+  p = addRun(p, 2400, 10, undefined, false);
+  assert.equal(p.best, 2400); assert.equal(p.lastStandBest, 0);
+  p = addRun(p, 900, 5, undefined, true);
+  assert.equal(p.lastStandBest, 900); assert.equal(p.best, 2400);
+  p = addRun(p, 600, 5, undefined, true);
+  assert.equal(p.lastStandBest, 900);
+  // old saves without the field load with a clean Last Stand record
+  assert.equal(normalizeProgress({ best: 3000 }).lastStandBest, 0);
+  assert.equal(normalizeProgress({ lastStandBest: 1234 }).lastStandBest, 1234);
+});

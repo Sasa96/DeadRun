@@ -9,7 +9,8 @@ interface Ctx extends Progress {
   loaded: boolean;
   error: string | null;
   retry: () => void;
-  recordRun: (distance: number, coins: number, stats?: RunStats) => boolean;
+  /** returns true for a new Last Stand best (always false for campaign runs) */
+  recordRun: (distance: number, coins: number, stats?: RunStats, lastStand?: boolean) => boolean;
   trophies: ReturnType<typeof trophiesOf>;
   completeMission: (id: number, seconds: number, distance: number, coins: number, stats: RunStats) => Promise<boolean>;
   updateSettings: (patch: Partial<Progress['settings']>) => void;
@@ -67,10 +68,10 @@ export function ProgressProvider({ children }: { children: React.ReactNode }) {
     return true;
   }, []);
 
-  const recordRun = useCallback((distance: number, coins: number, stats?: RunStats) => {
+  const recordRun = useCallback((distance: number, coins: number, stats?: RunStats, lastStand = false) => {
     const prev = progressRef.current;
-    const isBest = distance > prev.best;
-    save(addRun(prev, distance, coins, stats));
+    const isBest = lastStand && distance > prev.lastStandBest;
+    save(addRun(prev, distance, coins, stats, lastStand));
     return isBest;
   }, [save]);
   const completeMission = useCallback((id: number, seconds: number, distance: number, coins: number, stats: RunStats): Promise<boolean> => {

@@ -105,7 +105,7 @@ export default function Game() {
   const completeRef = useRef(progress.completeMission); completeRef.current = progress.completeMission;
   const campaignRef = useRef(progress.campaign); campaignRef.current = progress.campaign;
   const lastRecRef = useRef(0); const lastActRef = useRef(false); const seenSpecialRef = useRef(new Set<WalkerType>()); const bestRef = useRef(0); const passedBestRef = useRef(false);
-  bestRef.current = progress.best;
+  bestRef.current = progress.lastStandBest;
   const lastStandRef = useRef(false); lastStandRef.current = lastStandUnlocked(progress.campaign);
   const sceneRef = useRef<SceneApi | null>(null);
   const appActiveRef = useRef(AppState.currentState === 'active');
@@ -261,7 +261,7 @@ export default function Game() {
     if (s.mode !== 'over') return;
     const dist = Math.floor(s.dist);
     const stats = { turns: s.turnsTaken, jumps: s.jumps, slides: s.slides, pickups: s.pickupsRun };
-    const best = recordRef.current(dist, s.coinsRun, stats);
+    const best = recordRef.current(dist, s.coinsRun, stats, !s.campaign);
     setOffer(false); setToast(null);
     setResult({ dist, coins: s.coinsRun, best, ...stats, cause: s.deathCause === 'walker' ? (s.deathWalker && s.deathWalker !== 'walker' ? SPECIAL_CAUSE[s.deathWalker] : WALKER_CAUSE[s.deathKind ?? 0] ?? WALKER_CAUSE[0]) : CAUSE[s.deathCause ?? 'gap'] });
     setMode('over');
@@ -562,9 +562,9 @@ export default function Game() {
             <View style={styles.hudCard} pointerEvents="none">
               <Text style={styles.hudLabel}>DISTANCE</Text>
               <Text style={styles.hudBig}>{hud.dist}<Text style={styles.hudUnit}> m</Text></Text>
-              {!activeMission && progress.best > 0 && (
-                <Text style={[styles.hudBest, hud.dist > progress.best && { color: T.accent }]} testID="hud-best">
-                  {hud.dist > progress.best ? 'NEW BEST' : `BEST ${progress.best} m · ${progress.best - hud.dist} m to go`}
+              {!activeMission && progress.lastStandBest > 0 && (
+                <Text style={[styles.hudBest, hud.dist > progress.lastStandBest && { color: T.accent }]} testID="hud-best">
+                  {hud.dist > progress.lastStandBest ? 'NEW BEST' : `BEST ${progress.lastStandBest} m · ${progress.lastStandBest - hud.dist} m to go`}
                 </Text>
               )}
               <Text style={[styles.threat, hud.tier >= 4 && { color: T.destructive }]} testID="threat">THREAT {hud.tier + 1} · {hud.threat.toUpperCase()}{hud.overdrive > 0 ? ` +${hud.overdrive}` : ''}</Text>
@@ -631,10 +631,17 @@ export default function Game() {
                 <Text style={styles.errorText}>{progress.error}</Text>
               </Pressable>
             )}
-            <View style={styles.bestRow} testID="best-run" accessible accessibilityLabel={progress.loaded ? `Best run ${progress.best} metres` : 'Loading best run'}>
-              <Text style={styles.statLabel}>BEST RUN</Text>
-              <Text style={styles.bestValue}>{progress.loaded ? progress.best : '—'}<Text style={styles.hudUnit}> m</Text></Text>
-            </View>
+            {lastStandUnlocked(progress.campaign) ? (
+              <View style={styles.bestRow} testID="best-run" accessible accessibilityLabel={progress.loaded ? `Last Stand best ${progress.lastStandBest} metres` : 'Loading best run'}>
+                <Text style={styles.statLabel}>LAST STAND BEST</Text>
+                <Text style={styles.bestValue}>{progress.loaded ? progress.lastStandBest : '—'}<Text style={styles.hudUnit}> m</Text></Text>
+              </View>
+            ) : (
+              <View style={styles.bestRow} testID="best-run" accessible accessibilityLabel={progress.loaded ? `Escape progress ${progress.campaign.completed.length} of 10` : 'Loading progress'}>
+                <Text style={styles.statLabel}>ESCAPE PROGRESS</Text>
+                <Text style={styles.bestValue}>{progress.loaded ? progress.campaign.completed.length : '—'}<Text style={styles.hudUnit}> / 10</Text></Text>
+              </View>
+            )}
             <Animated.View style={{ transform: [{ scale: glow }], marginTop: 12 }}>
               <Pressable testID="start" disabled={!sceneReady || !progress.loaded} onPress={start} style={({ pressed }) => [styles.cta, pressed && styles.pressed, (!sceneReady || !progress.loaded) && { opacity: 0.5 }]}>
                 <Text style={styles.ctaText}>{!progress.loaded ? 'LOADING RECORDS' : sceneReady ? 'RUN' : 'LOADING CITY'}</Text>
@@ -717,10 +724,10 @@ export default function Game() {
               <Text style={[styles.kicker, { color: T.destructive }]}>CAUGHT</Text>
               <Text style={styles.panelSub}>{result.cause}</Text>
               <Text style={styles.resultBig}>{result.dist}<Text style={styles.hudUnit}> m</Text></Text>
-              {result.best ? (
+              {activeMission ? null : result.best ? (
                 <View style={styles.badge}><Feather name="award" size={14} color={T.accentForeground} /><Text style={styles.badgeText}>FURTHEST YET</Text></View>
               ) : (
-                <Text style={styles.panelSub}>Best {progress.best} m</Text>
+                <Text style={styles.panelSub}>Last Stand best {progress.lastStandBest} m</Text>
               )}
               <View style={styles.statsRow} testID="run-stats">
                 <Stat label="CORNERS" value={`${result.turns}`} />
@@ -760,7 +767,7 @@ export default function Game() {
       )}
 
       {mode === 'home' && !introOn && !cut && menu === 'chooser' && (
-        <ModeChooser top={top} bottom={bottom} best={progress.best} done={progress.campaign.completed.length} lastStand={lastStandUnlocked(progress.campaign)}
+        <ModeChooser top={top} bottom={bottom} best={progress.lastStandBest} done={progress.campaign.completed.length} lastStand={lastStandUnlocked(progress.campaign)}
           onBack={() => setMenu('home')} onEndless={startEndless} onEscape={() => setMenu('campaign')} />
       )}
       {mode === 'home' && !introOn && !cut && menu === 'campaign' && (

@@ -3,6 +3,8 @@ export type OutfitId = 'scout' | 'medic' | 'ranger';
 export interface RunStats { turns: number; jumps: number; slides: number; pickups: number }
 export interface Progress {
   best: number; totalCoins: number; runs: number;
+  /** furthest single Last Stand run; campaign runs never touch it */
+  lastStandBest: number;
   distance: number; turns: number; jumps: number; slides: number; pickups: number;
   claimed: string[]; owned: OutfitId[]; outfit: OutfitId;
   unlockedTrophies: string[];
@@ -10,7 +12,7 @@ export interface Progress {
   settings: { control: 'tilt' | 'touch'; sensitivity: number };
 }
 export const DEFAULT_PROGRESS: Progress = {
-  best: 0, totalCoins: 0, runs: 0, distance: 0, turns: 0, jumps: 0, slides: 0, pickups: 0,
+  best: 0, lastStandBest: 0, totalCoins: 0, runs: 0, distance: 0, turns: 0, jumps: 0, slides: 0, pickups: 0,
   claimed: [], owned: ['scout'], outfit: 'scout', unlockedTrophies: [], campaign: { completed: [], bestTimes: {} }, settings: { control: 'tilt', sensitivity: 1 },
 };
 export interface Trophy {
@@ -29,7 +31,7 @@ const TROPHIES = [
 const count = (n: unknown) => typeof n === 'number' && Number.isFinite(n) ? Math.max(0, Math.floor(n)) : 0;
 export function normalizeProgress(raw: Partial<Progress> = {}): Progress {
   const p = { ...DEFAULT_PROGRESS };
-  for (const key of ['best', 'totalCoins', 'runs', 'distance', 'turns', 'jumps', 'slides', 'pickups'] as const) p[key] = count(raw[key]);
+  for (const key of ['best', 'lastStandBest', 'totalCoins', 'runs', 'distance', 'turns', 'jumps', 'slides', 'pickups'] as const) p[key] = count(raw[key]);
   // Retain legacy metadata for save compatibility, but removed features cannot spend currency.
   p.claimed = Array.isArray(raw.claimed) ? raw.claimed.filter((id) => typeof id === 'string') : [];
   p.owned = ['scout'];
@@ -49,8 +51,9 @@ function unlockEarned(p: Progress): Progress {
   const earned = TROPHIES.filter((t) => p[t.key] >= t.target).map((t) => t.id);
   return { ...p, unlockedTrophies: [...new Set([...p.unlockedTrophies, ...earned])] };
 }
-export function addRun(p: Progress, distance: number, coins: number, stats?: RunStats): Progress {
+export function addRun(p: Progress, distance: number, coins: number, stats?: RunStats, lastStand = false): Progress {
   return unlockEarned({ ...p, best: Math.max(p.best, count(distance)), distance: p.distance + count(distance),
+    lastStandBest: lastStand ? Math.max(p.lastStandBest, count(distance)) : p.lastStandBest,
     totalCoins: p.totalCoins + count(coins), runs: p.runs + 1,
     turns: p.turns + count(stats?.turns), jumps: p.jumps + count(stats?.jumps), slides: p.slides + count(stats?.slides), pickups: p.pickups + count(stats?.pickups) });
 }

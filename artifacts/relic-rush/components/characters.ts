@@ -148,8 +148,27 @@ function addHead(b: Builder, s: Spec) {
     // cheekbone
     b.add(blob(0.028, 0.02, 0.025), skin, M(sx * 0.052, 0.085, -0.07));
   }
-  // lips / mouth
-  b.add(blob(0.026, s.slack ? 0.014 : 0.006, 0.01), { c: s.slack ? '#2A2024' : s.lip, noise: 0.02 }, M(0, 0.047 - (s.slack ? 0.006 : 0), -0.095));
+  // lids, nostril wings, philtrum, split lips, chin pad, temples
+  for (const sx of [-1, 1]) {
+    b.add(blob(0.016, 0.006, 0.01), { ...skin, ao: 0 }, M(sx * 0.035, 0.126, -0.1, -0.3));
+    b.add(blob(0.015, 0.004, 0.008), { c: s.sunken ? '#4A3E46' : skin.c, noise: 0.03 }, M(sx * 0.035, 0.104, -0.1));
+    b.add(blob(0.011, 0.01, 0.012), { ...skin, ao: 0.2 }, M(sx * 0.013, 0.074, -0.108));
+    b.add(blob(0.012, 0.03, 0.02), skin, M(sx * 0.083, 0.13, -0.05));
+  }
+  b.add(blob(0.007, 0.012, 0.006), { ...skin, ao: 0.25 }, M(0, 0.06, -0.104));
+  b.add(blob(0.026, 0.006, 0.011), { c: s.slack ? '#3A2A2E' : s.lip, noise: 0.02 }, M(0, 0.05, -0.098));
+  b.add(blob(0.024, s.slack ? 0.008 : 0.007, 0.011), { c: s.lip, noise: 0.03 }, M(0, 0.036 - (s.slack ? 0.012 : 0), -0.094));
+  if (s.slack) b.add(blob(0.022, 0.01, 0.006), { c: '#1A1216', noise: 0 }, M(0, 0.043 - 0.006, -0.094));
+  b.add(blob(0.022, 0.016, 0.014), skin, M(0, 0.008 - (s.slack ? 0.014 : 0), -0.088));
+  if (s.sunken) {
+    // infected: exposed teeth, torn cheek, one clouded bulging eye, bloody chin streak, bald scalp wound
+    for (let i = 0; i < 5; i++) b.add(new THREE.BoxGeometry(0.007, 0.009, 0.004), { c: '#C8BE98', noise: 0.1 }, M(-0.014 + i * 0.007, 0.044 - (s.slack ? 0.008 : 0), -0.1));
+    b.add(blob(0.022, 0.028, 0.008), { c: '#5A1E22', noise: 0.15, blotch: '#2A0E10', blotchAmt: 0.8 }, M(0.058, 0.06, -0.078, 0, 0.5));
+    for (let i = 0; i < 3; i++) b.add(new THREE.BoxGeometry(0.004, 0.008, 0.003), { c: '#B8AC88', noise: 0.1 }, M(0.05 + i * 0.006, 0.047, -0.086, 0, 0.5));
+    b.add(new THREE.SphereGeometry(0.0145, 8, 6), { c: '#D8E0C4', noise: 0.05 }, M(-0.035, 0.115, -0.1));
+    b.add(blob(0.008, 0.045, 0.006), { c: '#6A1E20', noise: 0.2 }, M(-0.01, -0.005, -0.09, 0.3));
+    b.add(blob(0.03, 0.022, 0.012), { c: '#4E2428', noise: 0.2, blotch: '#7A3A3A', blotchAmt: 0.6 }, M(0.04, 0.19, -0.04, -0.6, 0, 0.3));
+  }
   // hair
   const hairP = s.hair;
   switch (s.hairStyle) {
@@ -204,6 +223,14 @@ function buildHumanoid(s: Spec, mat: THREE.Material) {
   // torso (hips → neck)
   const torso = lathe([[0, -0.02], [0.135, 0.0], [0.128, 0.09], [0.14, 0.2], [0.158, 0.31], [0.165, 0.4], [0.155, 0.46], [0.11, 0.515], [0.06, 0.545], [0, 0.55]], 14);
   bld.torso.add(cloth(torso, s.folds, 0.04, s.tatter, s.seed), { ...s.top, ao: 0.35 }, M(0, 0, 0, 0, 0, 0, 1.2 * sw, 1, 0.74));
+  // chest planes, shoulder blades, lats so the jacket reads as a body underneath
+  for (const sx of [-1, 1]) {
+    bld.torso.add(blob(0.085, 0.07, 0.05, 2.2), { ...s.top, ao: 0.2 }, M(sx * 0.07 * sw, 0.36, -0.07));
+    bld.torso.add(blob(0.07, 0.085, 0.045, 2.2), { ...s.top, ao: 0.25 }, M(sx * 0.08 * sw, 0.37, 0.075));
+    bld.torso.add(blob(0.05, 0.12, 0.07, 2.2), { ...s.top, ao: 0.3 }, M(sx * 0.14 * sw, 0.22, 0));
+    bld.hips.add(blob(0.075, 0.07, 0.06, 2.2), { ...s.bottom, ao: 0.3 }, M(sx * 0.07, -0.05, 0.07));
+    bld.torso.add(blob(0.022, 0.06, 0.02), { ...s.skin, ao: 0.2 }, M(sx * 0.028, 0.6, -0.02, 0.35, 0, sx * 0.3));
+  }
   // traps / deltoids so shoulder joint is covered
   for (const sx of [-1, 1]) bld.torso.add(blob(0.072, 0.065, 0.07), s.top, M(sx * 0.19 * sw, 0.465, 0));
   bld.torso.add(limb(0.09, 0.046, 0.054, 0, 0.5, 9), s.skin, M(0, 0.62, 0.005));
@@ -220,9 +247,12 @@ function buildHumanoid(s: Spec, mat: THREE.Material) {
     if (covered) fo.add(ring(0.04, 0.009, 12), s.top, M(0, -0.225, 0, Math.PI / 2));
     else up.add(deform(ring(0.052, 0.012, 12), (v) => { v.z += hsh(Math.floor(Math.atan2(v.y, v.x) * 3) + i) * 0.03; }), s.top, M(0, -0.25, 0, Math.PI / 2));
     const hp = s.hand ?? s.skin;
-    fo.add(blob(0.032, 0.048, 0.022, 2.3), hp, M(0, -0.3, -0.004, 0.1));
-    fo.add(blob(0.012, 0.026, 0.012), hp, M(0, -0.29, -0.028, -0.4));
-    fo.add(blob(0.03, 0.022, 0.024, 2.4), hp, M(0, -0.345, -0.012, 0.4));
+    fo.add(blob(0.03, 0.04, 0.016, 2.6), hp, M(0, -0.295, -0.004, 0.1));
+    for (let f = 0; f < 4; f++) {
+      const fx = -0.018 + f * 0.012; const fl = f === 0 || f === 3 ? 0.036 : 0.044;
+      fo.add(limb(fl, 0.0068, 0.0058, 0, 0.5, 6), hp, M(fx, -0.33, -0.01, 0.55 + f * 0.05));
+    }
+    fo.add(limb(0.034, 0.008, 0.0065, 0, 0.5, 6), hp, M(i ? -0.026 : 0.026, -0.29, -0.018, 0.4, 0, i ? -0.6 : 0.6));
   };
   arm('L', 0); arm('R', 1);
 
@@ -231,11 +261,16 @@ function buildHumanoid(s: Spec, mat: THREE.Material) {
     const th = k === 'L' ? bld.legL : bld.legR; const sh = k === 'L' ? bld.shinL : bld.shinR;
     th.add(cloth(limb(0.42, 0.084, 0.056, 0.012, 0.7, 11), s.folds * 0.6, null, 0, s.seed + 3 + i), { ...s.bottom, ao: 0.18 }, M(0, 0, 0, 0, 0, 0, 1, 1, 1.05));
     sh.add(cloth(limb(0.39, 0.057, 0.042, 0.012, 0.72, 10), s.folds * 0.6, null, 0, s.seed + 5 + i), { ...s.bottom, ao: 0.15 });
+    th.add(blob(0.045, 0.04, 0.03), { ...s.bottom, ao: 0.1 }, M(0, -0.41, -0.035));
+    sh.add(blob(0.044, 0.09, 0.042, 2.2), { ...s.bottom, ao: 0.15 }, M(0, -0.12, 0.022));
     // footwear: shaft, foot, toe cap, sole
     sh.add(lathe([[0.048, -0.43], [0.052, -0.38], [0.054, -0.32], [0.05, -0.3]], 10), s.shoe);
     sh.add(blob(0.05, 0.04, 0.11, 2.6), { ...s.shoe, ao: 0.3 }, M(0, -0.432, -0.05));
     sh.add(blob(0.046, 0.03, 0.05, 2.2), { c: s.shoe.c, noise: 0.1, dirt: '#1C1714', dirtAmt: 0.4 }, M(0, -0.44, -0.12));
     sh.add(blob(0.054, 0.012, 0.125, 4), { c: '#1E1A18', noise: 0.03 }, M(0, -0.468, -0.052));
+    sh.add(blob(0.046, 0.022, 0.03, 3), { c: '#1E1A18', noise: 0.03 }, M(0, -0.455, 0.045));
+    for (let l = 0; l < 3; l++) sh.add(new THREE.BoxGeometry(0.05, 0.005, 0.008), { c: '#D8CCB0', noise: 0 }, M(0, -0.395 - l * 0.016, -0.075 - l * 0.016, 0.7));
+    sh.add(lathe([[0.056, -0.476], [0.057, -0.468]], 10), { c: '#4A4038', noise: 0.05 }, M(0, 0, -0.05, 0, 0, 0, 1, 1, 2.2));
   };
   leg('L', 0); leg('R', 1);
 
@@ -261,34 +296,69 @@ function buildHumanoid(s: Spec, mat: THREE.Material) {
 }
 
 // ---------- characters ----------
-export function buildSurvivor(mat: THREE.Material) {
+export type OutfitLook = 'scout' | 'medic' | 'ranger';
+/** Outfit palettes: derived from the Sodium Dusk scene palette. `swatch` drives UI chips. */
+export const OUTFITS: Record<OutfitLook, { jacket: string; jacketDark: string; pants: string; pack: string; packDark: string; hat: string; swatch: [string, string, string] }> = {
+  scout: { jacket: C.jacket, jacketDark: C.jacketDark, pants: C.jeans, pack: C.pack, packDark: C.packDark, hat: C.beanie, swatch: [C.jacket, C.beanie, C.pack] },
+  medic: { jacket: '#3E8F86', jacketDark: '#2A615C', pants: '#2F3A4E', pack: C.supplyCase, packDark: '#9C958A', hat: C.barrierWhite, swatch: ['#3E8F86', C.barrierWhite, C.barrierRed] },
+  ranger: { jacket: '#5E6A3C', jacketDark: '#3C4526', pants: '#4A3E34', pack: '#7A5A3A', packDark: '#4E3A26', hat: C.hazard, swatch: ['#5E6A3C', C.hazard, '#7A5A3A'] },
+};
+
+export function buildSurvivor(mat: THREE.Material, outfit: OutfitLook = 'scout') {
+  const o = OUTFITS[outfit];
   return buildHumanoid({
-    skin: { c: C.skin, noise: 0.04 }, top: { c: C.jacket, noise: 0.05, dirt: C.jacketDark, dirtAmt: 0.45 },
-    bottom: { c: C.jeans, noise: 0.06, dirt: '#2A3448', dirtAmt: 0.4 }, shoe: { c: C.boots, noise: 0.08 },
+    skin: { c: C.skin, noise: 0.04 }, top: { c: o.jacket, noise: 0.05, dirt: o.jacketDark, dirtAmt: 0.45 },
+    bottom: { c: o.pants, noise: 0.06, dirt: '#2A3448', dirtAmt: 0.4 }, shoe: { c: C.boots, noise: 0.08 },
     hair: { c: C.hair, noise: 0.08 }, hand: { c: '#3A3430', noise: 0.06 },
-    sleeves: [true, true], shoulders: 1.0, folds: 0.03, tatter: 0, seed: 1,
-    eyeWhite: '#E6DED2', iris: '#3A2A20', lip: '#A86A56', sunken: false, slack: false, hairStyle: 'beanie',
+    sleeves: [true, true], shoulders: outfit === 'ranger' ? 1.06 : 1.0, folds: 0.03, tatter: 0, seed: 1,
+    eyeWhite: '#E6DED2', iris: '#3A2A20', lip: '#A86A56', sunken: false, slack: false, hairStyle: outfit === 'ranger' ? 'short' : 'beanie',
     extras: (b) => {
-      const pk = { c: C.pack, noise: 0.06, ao: 0.35, dirt: C.packDark, dirtAmt: 0.4 };
+      const pk = { c: o.pack, noise: 0.06, ao: 0.35, dirt: o.packDark, dirtAmt: 0.4 };
       // hood bunched at collar, zipper, collar, chest pocket
-      b.torso.add(blob(0.12, 0.055, 0.065, 2.2), { c: C.jacket, ao: 0.4, dirt: C.jacketDark, dirtAmt: 0.5 }, M(0, 0.53, 0.07));
-      b.torso.add(ring(0.065, 0.02, 14), { c: C.jacketDark }, M(0, 0.53, 0, Math.PI / 2, 0, 0, 1.1, 0.9, 1));
+      b.torso.add(blob(0.12, 0.055, 0.065, 2.2), { c: o.jacket, ao: 0.4, dirt: o.jacketDark, dirtAmt: 0.5 }, M(0, 0.53, 0.07));
+      b.torso.add(ring(0.065, 0.02, 14), { c: o.jacketDark }, M(0, 0.53, 0, Math.PI / 2, 0, 0, 1.1, 0.9, 1));
       b.torso.add(blob(0.006, 0.24, 0.006, 2), { c: '#2A2522', noise: 0 }, M(0, 0.27, -0.123));
-      b.torso.add(blob(0.045, 0.035, 0.008, 3), { c: C.jacketDark }, M(0.075, 0.36, -0.118, 0, 0.2));
+      b.torso.add(blob(0.045, 0.035, 0.008, 3), { c: o.jacketDark }, M(0.075, 0.36, -0.118, 0, 0.2));
+      for (const sx of [-1, 1]) {
+        b.torso.add(blob(0.05, 0.06, 0.012, 2.6), { c: o.jacketDark, noise: 0.05 }, M(sx * 0.05, 0.5, -0.1, -0.4, 0, sx * 0.35));
+        b.torso.add(blob(0.004, 0.004, 0.13, 2), { c: o.jacketDark, noise: 0 }, M(sx * 0.12, 0.44, 0, 0, 0, 0));
+      }
+      b.foreL.add(blob(0.045, 0.045, 0.012, 3), { c: o.jacketDark, noise: 0.06 }, M(0, -0.02, 0.04));
+      b.foreR.add(blob(0.045, 0.045, 0.012, 3), { c: o.jacketDark, noise: 0.06 }, M(0, -0.02, 0.04));
+      b.torso.add(blob(0.01, 0.018, 0.006), { c: C.barrierWhite, noise: 0 }, M(0, 0.47, -0.128));
+      // jacket hem flare + reflective cuff bands (read at distance)
+      b.torso.add(cloth(lathe([[0.15, -0.04], [0.142, 0.06], [0.136, 0.12]], 14), 0.03, 0.0, 0.0, 4), { c: o.jacketDark, noise: 0.05 }, M(0, 0, 0, 0, 0, 0, 1.22, 1, 0.78));
+      b.foreL.add(ring(0.042, 0.008, 12), { c: C.barrierWhite, noise: 0 }, M(0, -0.2, 0, Math.PI / 2));
+      b.foreR.add(ring(0.042, 0.008, 12), { c: C.barrierWhite, noise: 0 }, M(0, -0.2, 0, Math.PI / 2));
       // backpack: main body, lid, front pocket, side bottle, bedroll, straps
       b.torso.add(blob(0.165, 0.2, 0.085, 3.4, 14, 10), pk, M(0, 0.3, 0.19));
-      b.torso.add(blob(0.17, 0.055, 0.1, 2.6), { c: C.packDark, noise: 0.06 }, M(0, 0.48, 0.19, 0.15));
-      b.torso.add(blob(0.11, 0.075, 0.035, 3.2), { c: C.packDark, noise: 0.05 }, M(0, 0.2, 0.28));
-      b.torso.add(new THREE.CylinderGeometry(0.03, 0.03, 0.15, 10), { c: C.beanie, noise: 0.04 }, M(0.18, 0.22, 0.18));
+      b.torso.add(blob(0.17, 0.055, 0.1, 2.6), { c: o.packDark, noise: 0.06 }, M(0, 0.48, 0.19, 0.15));
+      b.torso.add(blob(0.11, 0.075, 0.035, 3.2), { c: o.packDark, noise: 0.05 }, M(0, 0.2, 0.28));
+      b.torso.add(new THREE.CylinderGeometry(0.03, 0.03, 0.15, 10), { c: o.hat, noise: 0.04 }, M(0.18, 0.22, 0.18));
       b.torso.add(new THREE.CylinderGeometry(0.068, 0.068, 0.4, 12), { c: C.bedroll, noise: 0.08, ao: 0.2 }, M(0, 0.57, 0.2, 0, 0, Math.PI / 2));
       for (const sx of [-1, 1]) {
-        b.torso.add(ring(0.069, 0.01, 10), { c: C.packDark }, M(sx * 0.12, 0.57, 0.2, 0, Math.PI / 2));
-        b.torso.add(blob(0.022, 0.21, 0.01, 3), { c: C.packDark }, M(sx * 0.1, 0.32, -0.12, 0.1, 0, sx * 0.05));
-        b.torso.add(blob(0.024, 0.012, 0.13, 3), { c: C.packDark }, M(sx * 0.11, 0.5, 0.03, -0.25));
+        b.torso.add(ring(0.069, 0.01, 10), { c: o.packDark }, M(sx * 0.12, 0.57, 0.2, 0, Math.PI / 2));
+        b.torso.add(blob(0.022, 0.21, 0.01, 3), { c: o.packDark }, M(sx * 0.1, 0.32, -0.12, 0.1, 0, sx * 0.05));
+        b.torso.add(blob(0.024, 0.012, 0.13, 3), { c: o.packDark }, M(sx * 0.11, 0.5, 0.03, -0.25));
+      }
+      if (outfit === 'medic') {
+        // red cross on pack + armband, white scarf
+        b.torso.add(blob(0.05, 0.014, 0.006, 3), { c: C.barrierRed, noise: 0 }, M(0, 0.3, 0.278));
+        b.torso.add(blob(0.014, 0.05, 0.006, 3), { c: C.barrierRed, noise: 0 }, M(0, 0.3, 0.278));
+        b.armL.add(ring(0.056, 0.016, 12), { c: C.barrierWhite, noise: 0 }, M(0, -0.12, 0, Math.PI / 2));
+        b.armL.add(blob(0.012, 0.03, 0.006), { c: C.barrierRed, noise: 0 }, M(-0.06, -0.12, 0));
+        b.torso.add(ring(0.07, 0.024, 14), { c: C.barrierWhite, noise: 0.04 }, M(0, 0.51, -0.01, Math.PI / 2 - 0.2, 0, 0, 1.1, 0.9, 1));
+      } else if (outfit === 'ranger') {
+        // brimmed field cap, chest rig, knife sheath
+        b.head.add(new THREE.CylinderGeometry(0.105, 0.112, 0.07, 14), { c: o.hat, noise: 0.06, ao: 0.2 }, M(0, 0.2, 0.01, -0.12));
+        b.head.add(blob(0.15, 0.008, 0.16, 3), { c: '#B88A2E', noise: 0.05 }, M(0, 0.168, 0.0, -0.12));
+        b.torso.add(blob(0.14, 0.07, 0.03, 3.4), { c: o.packDark, noise: 0.06 }, M(0, 0.28, -0.13));
+        for (let i = -1; i <= 1; i++) b.torso.add(blob(0.035, 0.045, 0.02, 3), { c: o.pack, noise: 0.05 }, M(i * 0.08, 0.28, -0.155));
+        b.legL.add(blob(0.022, 0.09, 0.016, 3), { c: '#2A2420', noise: 0.04 }, M(-0.07, -0.12, 0));
       }
       // knee patch + utility pouch on belt
       b.legR.add(blob(0.05, 0.05, 0.012, 3), { c: '#33415C', noise: 0.08 }, M(0, -0.36, -0.07));
-      b.hips.add(blob(0.05, 0.045, 0.035, 3), { c: C.packDark, noise: 0.05 }, M(0.15, 0.0, -0.06, 0, 0.6));
+      b.hips.add(blob(0.05, 0.045, 0.035, 3), { c: o.packDark, noise: 0.05 }, M(0.15, 0.0, -0.06, 0, 0.6));
     },
   }, mat);
 }
@@ -406,9 +476,31 @@ const ZOMBIES: { spec: Omit<Spec, 'eyeWhite' | 'iris' | 'lip' | 'sunken'>; gait:
 ];
 export const ZOMBIE_KINDS = ZOMBIES.length;
 
+const WOUND = { c: '#5E1A1E', noise: 0.25, blotch: '#2A0C0E', blotchAmt: 0.8 };
+const STAIN = { c: '#6A2A2A', noise: 0.3, blotch: '#3A1416', blotchAmt: 0.6 };
+/** Seeded damage pass: bites, torn cloth, blood runs, a rib gash; different on every kind. */
+function damage(b: Record<BoneName, Builder>, seed: number) {
+  const r = (k: number) => hsh(seed * 13 + k);
+  const side = r(1) > 0.5 ? 1 : -1;
+  b.torso.add(blob(0.05, 0.07, 0.012, 2.4), STAIN, M(side * 0.06, 0.24 + r(2) * 0.15, -0.125, 0, 0, r(3)));
+  b.torso.add(blob(0.035, 0.05, 0.03), WOUND, M(side * 0.17, 0.22, -0.02));
+  for (let k = 0; k < 3; k++) b.torso.add(blob(0.03, 0.005, 0.012), { c: '#C8BEA0', noise: 0.1 }, M(side * 0.165, 0.2 + k * 0.022, -0.035, 0, 0, side * 0.2));
+  b.torso.add(blob(0.04, 0.035, 0.012, 2.4), STAIN, M(-side * 0.05, 0.5, -0.09, -0.4));
+  const fa = side > 0 ? b.foreR : b.foreL;
+  fa.add(blob(0.03, 0.035, 0.025), WOUND, M(0, -0.12, -0.03));
+  const th = r(4) > 0.5 ? b.legL : b.legR;
+  th.add(blob(0.06, 0.08, 0.014, 2.4), STAIN, M(0, -0.25, -0.07));
+  th.add(deform(blob(0.07, 0.05, 0.07, 2), (v) => { v.y -= Math.abs(Math.sin(v.x * 90)) * 0.02; }), { c: '#2A2224', noise: 0.1 }, M(0, -0.3, 0));
+}
+
 export function buildZombie(i: number, mat: THREE.Material) {
   const z = ZOMBIES[i % ZOMBIES.length];
-  const built = buildHumanoid({ ...z.spec, eyeWhite: '#C9CDB4', iris: C.zEye, lip: '#6E5A5E', sunken: true }, mat);
+  const prev = z.spec.extras;
+  const built = buildHumanoid({ ...z.spec, eyeWhite: '#C9CDB4', iris: C.zEye, lip: '#6E5A5E', sunken: true, extras: (b) => { prev?.(b); damage(b, z.spec.seed); } }, mat);
+  // asymmetric posture: one dropped, forward-rolled shoulder; head pitched off-axis
+  const low = z.gait.drag === 0 ? built.rig.armL : built.rig.armR;
+  low.position.y -= 0.035; low.position.z -= 0.03;
+  built.rig.head.position.z -= 0.02;
   return { ...built, gait: z.gait };
 }
 
@@ -457,6 +549,19 @@ export function animateSurvivor(r: Rig, s: Sim) {
   r.shinR.rotation.x = -(0.2 + 1.45 * sm(Math.max(0, -cs))) - 0.25 * Math.max(0, sn);
   r.armL.rotation.x = -sn * 0.85; r.armR.rotation.x = sn * 0.85;
   r.foreL.rotation.x = 1.25 + 0.35 * Math.max(0, -sn); r.foreR.rotation.x = 1.25 + 0.35 * Math.max(0, sn);
+  // panic glance over the shoulder when the horde is close
+  const near = Math.max(0, Math.min(1, (2.2 - s.horde) / 1.4));
+  if (near > 0) { const g = Math.max(0, Math.sin(s.time * 1.7)) ** 6 * near; r.head.rotation.y += g * 1.1; r.torso.rotation.y += g * 0.25; }
+  // stumble: pitch forward, arms windmill, knees buckle, then recover
+  const st = s.stumbleT ?? 0;
+  if (st > 0) {
+    const k = Math.sin(Math.min(1, st / 0.9) * Math.PI);
+    r.torso.rotation.x += 0.75 * k; r.head.rotation.x -= 0.35 * k; r.hips.position.y -= 0.14 * k;
+    r.armL.rotation.x -= 1.4 * k * (0.7 + 0.3 * Math.sin(s.time * 22)); r.armR.rotation.x -= 1.1 * k * (0.7 + 0.3 * Math.cos(s.time * 19));
+    r.armL.rotation.z += 0.6 * k; r.armR.rotation.z -= 0.6 * k;
+    r.shinL.rotation.x -= 0.5 * k; r.shinR.rotation.x -= 0.3 * k;
+    r.root.rotation.z += Math.sin(s.time * 14) * 0.12 * k;
+  }
 }
 
 /** Asymmetric shamble: one dragging leg, uneven reaching arms, head lolls and twitches. Leaves root.rotation.y for the caller. */
@@ -480,6 +585,28 @@ export function animateZombie(r: Rig, g: ZombieGait, t: number, lunge: number) {
   r.armL.rotation.set(reachL, 0, -0.08 + (reachL < 1 ? 0.12 : 0)); r.armR.rotation.set(reachR, 0, 0.1 - (reachR < 1 ? 0.12 : 0));
   r.foreL.rotation.x = reachL > 1 ? 0.15 + Math.sin(tt * 2.1) * 0.08 : 0.3 + sn * 0.2;
   r.foreR.rotation.x = reachR > 1 ? 0.2 + Math.cos(tt * 1.7) * 0.08 : 0.3 - sn * 0.2;
+  if (lunge > 0.25) {
+    // attack: alternating overhead claw swipes, jaw-first head thrust
+    const a = (lunge - 0.25) / 0.75; const sw = Math.sin(t * 9);
+    r.armL.rotation.x += a * (0.9 + sw * 0.7); r.armR.rotation.x += a * (0.9 - sw * 0.7);
+    r.armL.rotation.z -= a * 0.35; r.armR.rotation.z += a * 0.35;
+    r.foreL.rotation.x += a * (0.4 + Math.max(0, -sw)); r.foreR.rotation.x += a * (0.4 + Math.max(0, sw));
+    r.head.rotation.x -= a * 0.4; r.torso.rotation.x -= a * 0.15;
+  }
+}
+
+/** Fast infected charge for oncoming walkers: low forward lean, arms thrown out, long strides, jerky head. */
+export function animateZombieCharge(r: Rig, g: ZombieGait, t: number) {
+  const sn = Math.sin(t); const cs = Math.cos(t);
+  r.root.rotation.z = sn * 0.09;
+  r.hips.position.y = 0.9 + Math.abs(cs) * 0.08;
+  r.hips.rotation.set(0, sn * 0.18, 0);
+  r.torso.rotation.set(-0.45 - g.hunch * 0.4 + Math.abs(cs) * 0.06, -sn * 0.2, g.tilt * 0.2);
+  r.head.rotation.set(0.5 + Math.sin(t * 3.7) * 0.08, Math.sin(t * 11) * 0.06, g.tilt + Math.sin(t * 0.8) * 0.1);
+  r.legL.rotation.set(0.15 + sn * 1.0, 0, 0); r.legR.rotation.set(0.15 - sn * 1.0, 0, 0);
+  r.shinL.rotation.x = -(0.25 + 1.3 * sm(Math.max(0, cs))); r.shinR.rotation.x = -(0.25 + 1.3 * sm(Math.max(0, -cs)));
+  r.armL.rotation.set(1.3 + sn * 0.35 + g.reachL * 0.1, 0, -0.25); r.armR.rotation.set(1.3 - sn * 0.35 + g.reachR * 0.1, 0, 0.25);
+  r.foreL.rotation.x = 0.35 + Math.max(0, cs) * 0.3; r.foreR.rotation.x = 0.35 + Math.max(0, -cs) * 0.3;
 }
 
 /** Clone a built rig sharing geometry/material (pooled walkers). */

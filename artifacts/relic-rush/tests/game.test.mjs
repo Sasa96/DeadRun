@@ -83,6 +83,7 @@ test('incoming zombies move straight and collision uses real lateral position', 
   assert.equal(s.walkers[0].lane, 0.8);
   assert.equal(s.mode, 'run');
   const hit = clearRun();
+  hit.horde = 1;
   hit.walkers = [{ id: 1, s: 0.5, lane: 0, v: 4, kind: 6 }];
   advance(hit, 0.1);
   assert.equal(hit.deathCause, 'walker');
@@ -178,10 +179,119 @@ test('obstacle theme follows absolute obstacle distance, not runner stage; colli
   // same obstacle hit in the same way regardless of where the runner/stage is
   for (const base of [100, 1000, 1900]) for (const type of ['hurdle', 'beam']) {
     const s = newSim('run'); s.turn = { id: 9, s: 1e6, dir: 1 }; s.nextS = 1e9; s.dist = base; s.speed = 12;
+    s.horde = 1;
     s.obstacles = [{ id: 50, s: base + 3, lane: 0, type }];
     for (let i = 0; i < 30; i++) advance(s, 0.02);
     assert.equal(s.deathCause, type, `${type}@${base}`);
   }
+});
+
+import { actions, routeInfo } from '../lib/game.ts';
+import { normalizeProgress, addRun, trophiesOf } from '../lib/progression.ts';
+
+function openRun() {
+  const s = newSim('run');
+  s.turn.s = 1e8; s.nextS = 1e9;
+  return s;
+}
+test('first impact stumbles, grace prevents repeat impact, second close impact is fatal', () => {
+  const s = openRun();
+  s.obstacles = [{ id: 20, s: 0.4, lane: 0, type: 'hurdle' }];
+  const ev = advance(s, 0.05);
+  assert(ev.stumbled);
+  assert.equal(s.mode, 'run');
+  assert(s.stumbleT > 0 && s.horde < 3.5);
+  advance(s, 0.1);
+  assert.equal(s.mode, 'run');
+  s.invulnerableT = 0;
+  s.obstacles = [{ id: 21, s: s.dist + 0.4, lane: 0, type: 'beam' }];
+  advance(s, 0.05);
+  assert.equal(s.deathCause, 'beam');
+});
+test('clean running recovers horde separation and pausing freezes pickups and stumble timers', () => {
+  const s = openRun(); s.horde = 2; s.shieldT = 10; s.flashlightT = 10;
+  for (let i = 0; i < 100; i++) advance(s, 0.1);
+  assert(s.horde > 3);
+  s.mode = 'paused';
+  const before = [s.horde, s.shieldT, s.flashlightT, s.cleanTime, s.dist];
+  advance(s, 0.1);
+  assert.deepEqual([s.horde, s.shieldT, s.flashlightT, s.cleanTime, s.dist], before);
+});
+test('all pickups collect automatically with distinct benefits; shield cannot save a fall', () => {
+  for (const type of ['shield', 'flashlight', 'distraction']) {
+    const s = openRun(); s.horde = 2;
+    s.pickups = [{ id: 30, s: 0.5, lane: 0, type, taken: false }];
+    assert(advance(s, 0.05).pickup);
+    assert.equal(s.pickupsRun, 1); assert.equal(s.pickups.length, 0);
+    if (type === 'shield') {
+      s.obstacles = [{ id: 31, s: s.dist + 0.4, lane: 0, type: 'hurdle' }];
+      advance(s, 0.05);
+      assert.equal(s.shieldT, 0); assert.equal(s.mode, 'run');
+    } else if (type === 'flashlight') assert(s.flashlightT > 11);
+    else assert(s.distractionT > 7 && s.horde > 4);
+  }
+  const s = openRun(); s.shieldT = 12;
+  s.obstacles = [{ id: 32, s: 0.5, lane: 0, type: 'gap' }];
+  advance(s, 0.1); assert.equal(s.deathCause, 'gap');
+});
+test('branch corners accept either direction and preserve selected street direction', () => {
+  for (const dir of [-1, 1]) {
+    const s = clearRun(1); s.turn.branch = true; s.dist = 9.8;
+    requestTurn(s, dir); advance(s, 0.05);
+    assert.equal(s.mode, 'run'); assert.equal(s.lastTurn.dir, dir);
+    assert.equal(s.turnsTaken, 1);
+  }
+  assert.equal(routeInfo(0).id, 'boulevard');
+  assert.equal(routeInfo(300).id, 'alley');
+  assert.equal(routeInfo(600).id, 'collapsed');
+});
+test('sensitivity is continuous bounded and invalid input safe', () => {
+  assert(tiltLane(.1, 1.6) > tiltLane(.1, .6));
+  assert.equal(tiltLane(100, 1.6), 1.2);
+  assert.equal(tiltLane(NaN), 0);
+});
+test('legacy records migrate without easy trophies or active wardrobe selection', () => {
+  const p = normalizeProgress({ best: 650, totalCoins: 12, runs: 4 });
+  assert.equal(p.best, 650); assert.equal(p.settings.sensitivity, 1);
+  const withRun = addRun(p, 200, 3, { turns: 2, jumps: 10, slides: 5, pickups: 1 });
+  assert.equal(withRun.jumps, 10);
+  assert(trophiesOf(withRun).every((t) => !t.unlocked));
+  assert.equal(withRun.totalCoins, 15); // no claim reward or trophy currency
+  assert.equal(normalizeProgress({ outfit: 'medic', owned: ['scout', 'medic'] }).outfit, 'scout');
+  assert.equal(normalizeProgress({ settings: { sensitivity: NaN } }).settings.sensitivity, 1);
+});
+test('hard trophies unlock automatically at exact thresholds and remain unlocked across reloads', () => {
+  let p = normalizeProgress({ best: 1499, distance: 24000, turns: 99, pickups: 99 });
+  assert(trophiesOf(p).every((t) => !t.unlocked));
+  p = addRun(p, 1500, 8, { turns: 1, jumps: 0, slides: 0, pickups: 1 });
+  assert.deepEqual(new Set(p.unlockedTrophies), new Set(['survivor', 'navigator', 'resourceful', 'road-veteran']));
+  const restored = normalizeProgress(JSON.parse(JSON.stringify(p)));
+  assert.deepEqual(trophiesOf(restored), trophiesOf(p));
+  const later = addRun(restored, 6000, 0);
+  assert(trophiesOf(later).every((t) => t.unlocked));
+  assert.equal(new Set(later.unlockedTrophies).size, 7);
+  assert.equal(addRun(later, 10, 0).unlockedTrophies.length, 7);
+});
+test('earned trophies survive migration independently of counters, without duplicate awards or currency rewards', () => {
+  const legacy = normalizeProgress({
+    best: 0, totalCoins: 22,
+    unlockedTrophies: ['survivor', 'survivor', 'not-a-trophy'],
+  });
+  assert.deepEqual(legacy.unlockedTrophies, ['survivor']);
+  assert.equal(trophiesOf(legacy).find((t) => t.id === 'survivor').unlocked, true);
+  const earned = addRun(legacy, 6000, 0, { turns: 100, jumps: 0, slides: 0, pickups: 100 });
+  assert.equal(earned.totalCoins, 22);
+  assert.equal(new Set(earned.unlockedTrophies).size, earned.unlockedTrophies.length);
+  const restored = normalizeProgress(JSON.parse(JSON.stringify(earned)));
+  assert.deepEqual(restored.unlockedTrophies, earned.unlockedTrophies);
+});
+test('action counters count accepted inputs only; fresh runs clear powerups and stats', () => {
+  const s = openRun();
+  assert(actions.jump(s)); assert(!actions.jump(s)); assert.equal(s.jumps, 1);
+  s.jy = 0; s.vy = 0;
+  assert(actions.slide(s)); assert(!actions.slide(s)); assert.equal(s.slides, 1);
+  const fresh = newSim('run');
+  for (const key of ['shieldT', 'flashlightT', 'distractionT', 'stumbleT', 'pickupsRun', 'jumps', 'slides']) assert.equal(fresh[key], 0);
 });
 
 import { OB_POOL_CAP, SPAWN_AHEAD, DESPAWN_BEHIND } from '../lib/game.ts';

@@ -4,11 +4,14 @@ import { GLView, type ExpoWebGLRenderingContext } from 'expo-gl';
 import * as THREE from 'three';
 import { Feather } from '@expo/vector-icons';
 import colors, { scene as C } from '@/constants/colors';
-import { GAP_LEN, OB_POOL_CAP, STAGE_KINDS, STAGE_LEN, stageAt, type Sim, type StageId } from '@/lib/game';
+import { GAP_LEN, OB_POOL_CAP, STAGE_KINDS, STAGE_LEN, routeInfo, simObstaclePoolIndex, simStageAt, stageAt, type Sim, type StageId } from '@/lib/game';
 import { textGeo } from '@/components/pixelText';
 import { buildThemedObstacles } from '@/components/themedObstacles';
 import { createIntro, type Intro } from '@/components/IntroCinematic';
-import { animateSurvivor, animateZombie, buildSurvivor, buildZombie, cloneRig, ZOMBIE_KINDS } from '@/components/characters';
+import { createMissionCutscene, type MissionCutscene } from '@/components/MissionCutscene';
+import { buildMissionScenery, type Placer } from '@/components/missionScenery';
+import { missionById } from '@/lib/campaign';
+import { animateSurvivor, animateZombie, animateZombieCharge, buildSurvivor, buildZombie, cloneRig, ZOMBIE_KINDS, type OutfitLook } from '@/components/characters';
 
 const T = colors.light;
 const LW = 2.0; // metres between lane centres
@@ -20,6 +23,10 @@ export interface SceneApi {
   renderIntro: (t: number) => void;
   /** dispose intro resources (idempotent) */
   endIntro: () => void;
+  /** draw the completion cutscene for a campaign mission at time t (s); builds lazily */
+  renderMissionCutscene: (id: number, t: number) => void;
+  /** dispose cutscene resources (idempotent) */
+  endMissionCutscene: () => void;
 }
 interface Props { width: number; height: number; onReady: (api: SceneApi | null) => void }
 
@@ -67,7 +74,7 @@ function createEngine(gl: ExpoWebGLRenderingContext, w: number, h: number) {
   scn.fog = new THREE.Fog(C.fog, 22, VIS);
   const cam = new THREE.PerspectiveCamera(62, w / Math.max(1, h), 0.1, 260);
 
-  scn.add(new THREE.HemisphereLight(C.skyLow, C.asphaltDark, 1.25));
+  const hemiL = new THREE.HemisphereLight(C.skyLow, C.asphaltDark, 1.25); scn.add(hemiL);
   const sunL = new THREE.DirectionalLight(C.sun, 1.6); sunL.position.set(-6, 7, -12); scn.add(sunL);
   const rim = new THREE.DirectionalLight(C.supply, 0.35); rim.position.set(5, 4, 8); scn.add(rim);
 
@@ -124,7 +131,7 @@ function createEngine(gl: ExpoWebGLRenderingContext, w: number, h: number) {
   const fogNow = new THREE.Color(C.fog);
   // generic box pieces for floors, sidewalks, curbs, interior walls and ceilings
   const pieces: THREE.Mesh[] = [];
-  for (let i = 0; i < 96; i++) { const m = new THREE.Mesh(unit, roadMat); m.visible = false; world.add(m); pieces.push(m); }
+  for (let i = 0; i < 132; i++) { const m = new THREE.Mesh(unit, roadMat); m.visible = false; world.add(m); pieces.push(m); }
   const crackMat = regM(basic(C.asphaltDark));
   const crackGeo = reg(new THREE.PlaneGeometry(1, 1));
   const cracks: THREE.Mesh[] = [];
@@ -219,8 +226,10 @@ function createEngine(gl: ExpoWebGLRenderingContext, w: number, h: number) {
     // amber corner beacons
     add(mir, glowJ, 0.18, 0.18, 0.18, HW + 0.4, 1.0, -HW - 0.2);
     add(mir, glowJ, 0.18, 0.18, 0.18, HW + 0.4, 1.0, HW + 0.2);
+    // branch splits: a mirrored copy shares geometry/materials and lights the second opening
+    const mir2 = mir.clone(true); mir2.visible = false; g.add(mir2);
     g.visible = false; world.add(g);
-    return { g, mir };
+    return { g, mir, mir2 };
   });
 
   // ---------- interior dressing ----------
@@ -348,8 +357,10 @@ function createEngine(gl: ExpoWebGLRenderingContext, w: number, h: number) {
   const charMat = regM(new THREE.MeshLambertMaterial({ vertexColors: true }));
   const shadowMat = regM(basic(C.ink, { transparent: true, opacity: 0.38, depthWrite: false }));
   const shadowGeo = reg(new THREE.CircleGeometry(0.42, 16));
-  const survB = buildSurvivor(charMat); survB.geos.forEach(reg);
-  const surv = survB.rig; world.add(surv.root);
+  // one rig per outfit, built once; only the equipped one is visible (no per-frame material work)
+  const survRigs = {} as Record<OutfitLook, ReturnType<typeof buildSurvivor>['rig']>;
+  for (const o of ['scout', 'medic', 'ranger'] as const) { const b = buildSurvivor(charMat, o); b.geos.forEach(reg); b.rig.root.visible = o === 'scout'; world.add(b.rig.root); survRigs[o] = b.rig; }
+  let surv = survRigs.scout;
   const survShadow = new THREE.Mesh(shadowGeo, shadowMat); survShadow.rotation.x = -Math.PI / 2; survShadow.position.y = 0.02; world.add(survShadow);
   const zombies = [0, 1, 2, 3, 4].map((i) => {
     const zb = buildZombie(i, charMat); zb.geos.forEach(reg);
@@ -373,13 +384,66 @@ function createEngine(gl: ExpoWebGLRenderingContext, w: number, h: number) {
     }));
   }
 
+  // ---------- pickups, power-up effects, hazard telegraphs, route dressing ----------
+  const shieldM = regM(basic(C.supply)); const lightM = regM(basic(C.lampGlow)); const flareM = regM(basic(C.barrierRed));
+  const pickBody = regM(lam(C.hazardDark)); const pickWhite = regM(lam(C.barrierWhite));
+  const haloGeo = reg(new THREE.RingGeometry(0.42, 0.56, 24));
+  const haloMats = { shield: regM(basic(C.supply, { transparent: true, opacity: 0.55, depthWrite: false })), flashlight: regM(basic(C.lampGlow, { transparent: true, opacity: 0.55, depthWrite: false })), distraction: regM(basic(C.barrierRed, { transparent: true, opacity: 0.55, depthWrite: false })) };
+  const hexGeo = reg(new THREE.CylinderGeometry(0.34, 0.34, 0.08, 6)); const hexIn = reg(new THREE.CylinderGeometry(0.2, 0.2, 0.1, 6));
+  const torchGeo = reg(new THREE.CylinderGeometry(0.07, 0.09, 0.5, 8)); const lensGeo = reg(new THREE.CylinderGeometry(0.15, 0.1, 0.14, 10));
+  const flareGeo = reg(new THREE.CylinderGeometry(0.06, 0.06, 0.55, 8)); const tipGeo = reg(new THREE.SphereGeometry(0.11, 8, 6));
+  type PickType = 'shield' | 'flashlight' | 'distraction';
+  const pickMake: Record<PickType, () => THREE.Group> = {
+    shield: () => { const g = new THREE.Group(); const a = new THREE.Mesh(hexGeo, shieldM); a.rotation.x = Math.PI / 2; g.add(a); const b = new THREE.Mesh(hexIn, pickBody); b.rotation.x = Math.PI / 2; g.add(b); return g; },
+    flashlight: () => { const g = new THREE.Group(); const a = new THREE.Mesh(torchGeo, pickBody); a.rotation.x = Math.PI / 2; g.add(a); const b = new THREE.Mesh(lensGeo, lightM); b.rotation.x = Math.PI / 2; b.position.z = -0.3; g.add(b); return g; },
+    distraction: () => { const g = new THREE.Group(); const a = new THREE.Mesh(flareGeo, pickWhite); a.rotation.z = 0.5; g.add(a); const b = new THREE.Mesh(tipGeo, flareM); b.position.set(-0.13, 0.25, 0); g.add(b); return g; },
+  };
+  const pickPools = {} as Record<PickType, { g: THREE.Group; halo: THREE.Mesh }[]>;
+  for (const t of ['shield', 'flashlight', 'distraction'] as const) pickPools[t] = mkPool(4, () => {
+    const g = pickMake[t](); g.visible = false; world.add(g);
+    const halo = new THREE.Mesh(haloGeo, haloMats[t]); halo.rotation.x = -Math.PI / 2; halo.visible = false; world.add(halo);
+    return { g, halo };
+  });
+  const pickUse = { shield: 0, flashlight: 0, distraction: 0 };
+  // shield bubble around the survivor
+  const bubbleM = regM(basic(C.supply, { transparent: true, opacity: 0.18, depthWrite: false }));
+  const bubble = new THREE.Mesh(reg(new THREE.IcosahedronGeometry(0.95, 1)), bubbleM); bubble.visible = false; world.add(bubble);
+  const bubbleWire = new THREE.Mesh(bubble.geometry, regM(basic(C.ring, { wireframe: true, transparent: true, opacity: 0.35 }))); bubble.add(bubbleWire);
+  // flashlight beam: open cone + ground pool ahead of the runner
+  const beamM = regM(basic(C.lampGlow, { transparent: true, opacity: 0.1, depthWrite: false, side: THREE.DoubleSide }));
+  const beamCone = new THREE.Mesh(reg(new THREE.ConeGeometry(2.6, 16, 14, 1, true)), beamM); beamCone.rotation.x = -Math.PI / 2; beamCone.visible = false; world.add(beamCone);
+  const lightPool = new THREE.Mesh(reg(new THREE.CircleGeometry(2.4, 20)), regM(basic(C.lampGlow, { transparent: true, opacity: 0.16, depthWrite: false }))); lightPool.rotation.x = -Math.PI / 2; lightPool.scale.set(1, 2.6, 1); lightPool.visible = false; world.add(lightPool);
+  // distraction flare dropped behind: red stick + glow disc the horde turns toward
+  const flareG = new THREE.Group(); { const a = new THREE.Mesh(flareGeo, pickWhite); a.rotation.z = 1.3; a.position.y = 0.08; flareG.add(a); const b = new THREE.Mesh(tipGeo, flareM); b.position.set(-0.27, 0.12, 0); flareG.add(b); }
+  const flareGlowM = regM(basic(C.barrierRed, { transparent: true, opacity: 0.3, depthWrite: false }));
+  const flareGlow = new THREE.Mesh(reg(new THREE.CircleGeometry(1.6, 18)), flareGlowM); flareGlow.rotation.x = -Math.PI / 2; flareGlow.position.y = 0.03; flareG.add(flareGlow);
+  flareG.visible = false; world.add(flareG);
+  // hazard telegraph: amber floor chevron before every hazard; brighter under the flashlight
+  const telM = regM(basic(C.hazard, { transparent: true, opacity: 0.22, depthWrite: false }));
+  const telLitM = regM(basic(C.hazard, { transparent: true, opacity: 0.6, depthWrite: false }));
+  const telGeo = reg(new THREE.PlaneGeometry(LW * 0.8, 0.5));
+  const tels = mkPool(28, () => { const m = new THREE.Mesh(telGeo, telM); m.rotation.x = -Math.PI / 2; m.visible = false; world.add(m); return m; });
+  // route dressing: alleys get dumpsters + cables, collapsed corridors get rubble + fallen slabs (sidewalk only)
+  const rustM = regM(lam(C.carRust)); const tealM = regM(lam(C.carTeal)); const rubbleM = regM(lam(C.pitRim));
+  const rubbleGeo = reg(new THREE.DodecahedronGeometry(0.5, 0));
+  const routeMake: Record<'alley' | 'collapsed', () => THREE.Group> = {
+    alley: () => { const g = new THREE.Group(); mk(g, tealM, 1.2, 1.1, 2.0, -0.6, 0.55, 0); mk(g, darkSteel, 1.3, 0.1, 2.1, -0.6, 1.15, 0, 0, 0.12); mk(g, rustM, 0.5, 0.5, 0.5, 0.4, 0.25, 1.4, 0.4); mk(g, darkSteel, 0.03, 0.03, 9, 0, 5.6, 0, 0, 0); mk(g, darkSteel, 0.02, 0.02, 8, 1.2, 5.2, 0, 0.3, 0); return g; },
+    collapsed: () => { const g = new THREE.Group(); for (let i = 0; i < 4; i++) { const r = new THREE.Mesh(rubbleGeo, i % 2 ? concrete : rubbleM); r.position.set(-0.5 + hash(i) * 0.8, 0.2 + i * 0.05, -1 + i * 0.6); r.scale.setScalar(0.5 + hash(i + 5) * 0.6); r.rotation.set(i, i * 2, 0); g.add(r); } mk(g, concrete, 2.6, 0.25, 1.4, -0.3, 1.2, 0, 0.2, 0.75); mk(g, darkSteel, 0.06, 2.4, 0.06, 0.3, 1.0, 0.8, 0, 0.5); return g; },
+  };
+  const routePools = { alley: mkPool(10, routeMake.alley), collapsed: mkPool(10, routeMake.collapsed) };
+  for (const k of ['alley', 'collapsed'] as const) for (const g of routePools[k]) { g.visible = false; world.add(g); }
+  const routeCache = new Map<number, 'boulevard' | 'alley' | 'collapsed'>();
+  const routeAt = (x: number) => { const b = Math.floor(Math.max(0, x) / 50); let r = routeCache.get(b); if (!r) { r = routeInfo(b * 50 + 1).id; if (routeCache.size > 400) routeCache.clear(); routeCache.set(b, r); } return r; };
+  const routeUse = { alley: 0, collapsed: 0 };
+
   const flashMat = regM(basic(C.barrierRed, { transparent: true, opacity: 0, depthTest: false, depthWrite: false, fog: false }));
   const flash = new THREE.Mesh(reg(new THREE.PlaneGeometry(4, 4)), flashMat); flash.renderOrder = 999; flash.position.set(0, 0, -0.5); cam.add(flash); scn.add(cam);
 
   // segment frames: 0 = previous street, 1 = current, 2 = next (after the corner)
-  interface Seg { on: boolean; id: number; cx: number; cz: number; fx: number; fz: number; rx: number; rz: number; s0: number; yaw: number; from: number; to: number; sC: number | null; dS: number; eC: number | null; dE: number; y: number }
-  const mkSeg = (): Seg => ({ on: false, id: 0, cx: 0, cz: 0, fx: 0, fz: -1, rx: 1, rz: 0, s0: 0, yaw: 0, from: 0, to: 0, sC: null, dS: 0, eC: null, dE: 0, y: 0 });
-  const segs = [mkSeg(), mkSeg(), mkSeg()];
+  interface Seg { on: boolean; id: number; cx: number; cz: number; fx: number; fz: number; rx: number; rz: number; s0: number; yaw: number; from: number; to: number; sC: number | null; dS: number; eC: number | null; dE: number; dE2: number; y: number }
+  const mkSeg = (): Seg => ({ on: false, id: 0, cx: 0, cz: 0, fx: 0, fz: -1, rx: 1, rz: 0, s0: 0, yaw: 0, from: 0, to: 0, sC: null, dS: 0, eC: null, dE: 0, dE2: 0, y: 0 });
+  // 3 = the second opening of a branch junction (visual stub only; the sim decides which way you went)
+  const segs = [mkSeg(), mkSeg(), mkSeg(), mkSeg(), mkSeg()]; // 4 = unused opening of the branch just taken
   const P = { x: 0, z: 0 };
   const at = (g: Seg, sAlong: number, lat: number) => { P.x = g.cx + g.fx * (sAlong - g.s0) + g.rx * lat; P.z = g.cz + g.fz * (sAlong - g.s0) + g.rz * lat; return P; };
   const segOf = (sAlong: number) => (segs[0].on && segs[0].eC !== null && sAlong < segs[0].eC ? segs[0] : segs[2].on && sAlong > (segs[1].eC ?? Infinity) ? segs[2] : segs[1]);
@@ -393,27 +457,45 @@ function createEngine(gl: ExpoWebGLRenderingContext, w: number, h: number) {
     at(g, (a + b) / 2, lat); m.position.set(P.x, y, P.z); m.rotation.set(0, g.yaw, 0); m.scale.set(wdt, hgt, b - a);
   };
   // split [a,b] at a stage boundary (at most one inside any visible range)
+  // campaign missions slice stages by their own sections; endless keeps the 900 m cycle
+  let curSim: Sim | null = null; let bounds: number[] | null = null; let boundsFor = -1;
+  const stAt = (x: number): StageId => (curSim && curSim.campaign ? simStageAt(curSim, x) : stageAt(x));
   const ranges = (a: number, b: number, fn: (a: number, b: number, st: StageId) => void) => {
     if (b - a <= 0.05) return;
+    if (bounds) { let B2 = -1; for (const x of bounds) if (x > a && x < b) { B2 = x; break; } if (B2 > 0) { fn(a, B2, stAt(a)); fn(B2, b, stAt(B2 + 0.01)); } else fn(a, b, stAt(a + 0.01)); return; }
     const B = Math.ceil(a / STAGE_LEN) * STAGE_LEN;
     if (B > a && B < b) { fn(a, B, stageAt(a)); fn(B, b, stageAt(B)); } else fn(a, b, stageAt(a + 0.01));
   };
-  const nearBoundary = (x: number, m: number) => { const r = ((x % STAGE_LEN) + STAGE_LEN) % STAGE_LEN; return r < m || STAGE_LEN - r < m; };
+  const nearBoundary = (x: number, m: number) => { if (bounds) { for (const b of bounds) if (Math.abs(x - b) < m) return true; return false; } const r = ((x % STAGE_LEN) + STAGE_LEN) % STAGE_LEN; return r < m || STAGE_LEN - r < m; };
 
+  const scenery = buildMissionScenery({ world, unit, charMat, shadowGeo, shadowMat, reg, regM, HW, SW, LW });
+  const Q = { x: 0, z: 0, y: 0, yaw: 0 };
+  const placeG: Placer = (sl, lat) => { const g = segOf(sl); at(g, sl, lat); Q.x = P.x; Q.z = P.z; Q.y = g.y; Q.yaw = g.yaw; return Q; };
   let W = w; let H = h;
   const render = (s: Sim) => {
     const d = s.dist; const L = s.lastTurn; const J = s.turn;
+    curSim = s;
+    if (s.campaign) {
+      if (boundsFor !== s.campaign.id) { boundsFor = s.campaign.id; const secs = missionById(s.campaign.id).sections; bounds = []; for (let i = 1; i < secs.length; i++) if (secs[i].stage !== secs[i - 1].stage) bounds.push(secs[i].from); }
+    } else { bounds = null; boundsFor = -1; }
+    scenery.begin(s);
     const curId = L ? L.id : 0;
     if (curId !== curSeen) { prevSeen = curSeen; curSeen = curId; }
-    const [prv, cur, nxt] = segs;
-    Object.assign(cur, { on: true, id: curId, cx: 0, cz: 0, fx: 0, fz: -1, rx: 1, rz: 0, s0: d, yaw: 0, from: d - 40, to: Math.min(J.s + HW + SW, d + VIS + 10), sC: L ? L.s : null, dS: L ? L.dir : 0, eC: J.s, dE: J.dir, y: 0 });
-    Object.assign(nxt, { on: J.s - d < VIS + 10, id: J.id, cx: 0, cz: -(J.s - d), fx: J.dir, fz: 0, rx: 0, rz: J.dir, s0: J.s, yaw: -J.dir * Math.PI / 2, from: J.s - HW - SW, to: J.s + Math.max(20, VIS - (J.s - d)), sC: J.s, dS: J.dir, eC: null, dE: 0, y: 0.006 });
-    if (L && d - L.s < 45) Object.assign(prv, { on: true, id: prevSeen, cx: 0, cz: -(L.s - d), fx: -L.dir, fz: 0, rx: 0, rz: -L.dir, s0: L.s, yaw: L.dir * Math.PI / 2, from: L.s - 60, to: L.s + HW + SW, sC: null, dS: 0, eC: L.s, dE: L.dir, y: 0.006 });
+    const [prv, cur, nxt, alt, alt2] = segs;
+    Object.assign(cur, { on: true, id: curId, cx: 0, cz: 0, fx: 0, fz: -1, rx: 1, rz: 0, s0: d, yaw: 0, from: d - 40, to: Math.min(J.s + HW + SW, d + VIS + 10), sC: L ? L.s : null, dS: L ? L.dir : 0, eC: J.s, dE: J.dir, dE2: J.branch ? -J.dir : 0, y: 0 });
+    Object.assign(nxt, { on: J.s - d < VIS + 10, id: J.id, cx: 0, cz: -(J.s - d), fx: J.dir, fz: 0, rx: 0, rz: J.dir, s0: J.s, yaw: -J.dir * Math.PI / 2, from: J.s - HW - SW, to: J.s + Math.max(20, VIS - (J.s - d)), sC: J.s, dS: J.dir, eC: null, dE: 0, dE2: 0, y: 0.006 });
+    if (J.branch && J.s - d < VIS + 10) Object.assign(alt, { on: true, id: J.id + 5000, cx: 0, cz: -(J.s - d), fx: -J.dir, fz: 0, rx: 0, rz: -J.dir, s0: J.s, yaw: J.dir * Math.PI / 2, from: J.s - HW - SW, to: J.s + 34, sC: J.s, dS: -J.dir, eC: null, dE: 0, dE2: 0, y: 0.006 });
+    else alt.on = false;
+    if (L && d - L.s < 45) Object.assign(prv, { on: true, id: prevSeen, cx: 0, cz: -(L.s - d), fx: -L.dir, fz: 0, rx: 0, rz: -L.dir, s0: L.s, yaw: L.dir * Math.PI / 2, from: L.s - 60, to: L.s + HW + SW, sC: null, dS: 0, eC: L.s, dE: L.dir, dE2: 0, y: 0.006 });
     else prv.on = false;
+    prv.dE2 = prv.on && L && L.branch ? -L.dir : 0;
+    if (prv.on && L && L.branch) Object.assign(alt2, { on: true, id: L.id + 7000, cx: 0, cz: d - L.s, fx: 0, fz: 1, rx: -1, rz: 0, s0: L.s, yaw: Math.PI, from: L.s - HW - SW, to: L.s + 34, sC: L.s, dS: -L.dir, eC: null, dE: 0, dE2: 0, y: 0.006 });
+    else alt2.on = false;
 
     let bi2 = 0; let li = 0; let ci2 = 0; pi = 0; let cl = 0; let sb = 0; const signUse = { police: 0, hospital: 0 };
     for (const k in propUse) propUse[k] = 0;
-    for (let k = 0; k < 3; k++) {
+    routeUse.alley = 0; routeUse.collapsed = 0;
+    for (let k = 0; k < segs.length; k++) {
       const g = segs[k];
       if (!g.on) continue;
       const ra = Math.max(g.from, g.sC !== null ? g.sC - HW : -Infinity); const rb = Math.min(g.to, g.eC !== null ? g.eC + HW : Infinity);
@@ -424,14 +506,14 @@ function createEngine(gl: ExpoWebGLRenderingContext, w: number, h: number) {
       for (let q = 0; q < 2; q++) {
         const sg = q ? 1 : -1;
         const a = Math.max(g.from, g.sC !== null ? (sg === g.dS ? g.sC + HW : g.sC - HW - SW) : -Infinity);
-        const b = Math.min(g.to, g.eC !== null ? (sg === g.dE ? g.eC - HW : g.eC + HW + SW) : Infinity);
+        const b = Math.min(g.to, g.eC !== null ? ((sg === g.dE || sg === g.dE2) ? g.eC - HW : g.eC + HW + SW) : Infinity);
         ranges(a, b, (a2, b2, st) => piece(SM[st].walk, g, a2, b2, sg * (HW + SW / 2), SW, 0.2, 0.1 + g.y));
-        const cb = Math.min(g.to, g.eC !== null ? (sg === g.dE ? g.eC - HW : g.eC + HW) : Infinity);
+        const cb = Math.min(g.to, g.eC !== null ? ((sg === g.dE || sg === g.dE2) ? g.eC - HW : g.eC + HW) : Infinity);
         const ca = Math.max(g.from, g.sC !== null ? (sg === g.dS ? g.sC + HW : g.sC - HW) : -Infinity);
         ranges(ca, cb, (a2, b2, st) => piece(SM[st].curb, g, a2, b2, sg * (HW + 0.12), 0.25, 0.24, 0.12 + g.y));
         // interior walls close the corridor and meet exactly at both corner types
         const wa = Math.max(g.from, g.sC !== null ? (sg === g.dS ? g.sC + FW : g.sC - FW) : -Infinity);
-        const wb = Math.min(g.to, g.eC !== null ? (sg === g.dE ? g.eC - FW : g.eC + FW) : Infinity);
+        const wb = Math.min(g.to, g.eC !== null ? ((sg === g.dE || sg === g.dE2) ? g.eC - FW : g.eC + FW) : Infinity);
         ranges(wa, wb, (a2, b2, st) => {
           const wm = SM[st].wall; const bm = SM[st].band; if (!wm || !bm) return;
           piece(wm, g, a2, b2, sg * (FW + 0.2), 0.4, 6.6, 3.3 + g.y);
@@ -439,9 +521,9 @@ function createEngine(gl: ExpoWebGLRenderingContext, w: number, h: number) {
         });
         // city buildings
         const lo = Math.max(g.from, g.sC !== null ? (sg === g.dS ? g.sC + HW + SW + 5 : g.sC - HW) : -Infinity);
-        const hi = Math.min(g.to, g.eC !== null ? (sg === g.dE ? g.eC - HW - SW - 5 : g.eC + HW) : Infinity);
+        const hi = Math.min(g.to, g.eC !== null ? ((sg === g.dE || sg === g.dE2) ? g.eC - HW - SW - 5 : g.eC + HW) : Infinity);
         for (let n = Math.ceil(lo / BSP); n * BSP <= hi && bi2 < blds.length; n++) {
-          if (stageAt(n * BSP) !== 'city' || nearBoundary(n * BSP, 4)) continue;
+          if (stAt(n * BSP) !== 'city' || nearBoundary(n * BSP, 4) || scenery.openAt(n * BSP)) continue;
           const b2 = blds[bi2++]; const seed = n * 31 + g.id * 977 + sg * 7;
           const bh = 7 + hash(seed) * 16; const bw = 6 + hash(seed + 1) * 3; const bd = BSP - 0.6 - hash(seed + 2) * 1.5;
           b2.body.scale.set(bw, bh, bd); b2.body.position.set(0, bh / 2, 0); b2.body.material = bMats[Math.floor(hash(seed + 3) * 3)];
@@ -455,7 +537,7 @@ function createEngine(gl: ExpoWebGLRenderingContext, w: number, h: number) {
         const chi = Math.min(g.to, g.eC !== null ? g.eC - HW - SW - 2 : Infinity);
         const off = sg > 0 ? LSP / 2 : 0;
         for (let n = Math.ceil((clo - off) / LSP); n * LSP + off <= chi && li < lamps.length; n++) {
-          const sl = n * LSP + off; if (stageAt(sl) !== 'city' || nearBoundary(sl, 6)) continue;
+          const sl = n * LSP + off; if (stAt(sl) !== 'city' || nearBoundary(sl, 6) || scenery.openAt(sl)) continue;
           const lp = lamps[li++]; at(g, sl, sg * (HW + 0.7));
           lp.g.visible = true; lp.g.position.set(P.x, g.y, P.z); lp.g.rotation.set(0, g.yaw + (sg < 0 ? 0 : Math.PI), 0);
           const sd = n * 5 + g.id * 3 + sg; const dead = hash(sd) > 0.8; const flick = hash(sd + 9) > 0.6 && Math.sin(s.time * 23 + n * 3) > 0.6;
@@ -463,7 +545,7 @@ function createEngine(gl: ExpoWebGLRenderingContext, w: number, h: number) {
         }
         const coff = sg > 0 ? 13 : 0;
         for (let n = Math.ceil((clo - coff) / CSP); n * CSP + coff <= chi && ci2 < cars.length; n++) {
-          const sl = n * CSP + coff; if (stageAt(sl) !== 'city' || nearBoundary(sl, 6)) continue;
+          const sl = n * CSP + coff; if (stAt(sl) !== 'city' || nearBoundary(sl, 6) || scenery.openAt(sl)) continue;
           const cr = cars[ci2++]; const sd = n * 11 + g.id * 5 + sg * 3;
           at(g, sl, sg * (HW + 2.0 + hash(sd) * 0.8));
           cr.g.visible = true; cr.g.position.set(P.x, g.y, P.z);
@@ -473,31 +555,43 @@ function createEngine(gl: ExpoWebGLRenderingContext, w: number, h: number) {
         // interior props along the walls (desks/lockers/barriers or beds/gurneys/bays)
         const poff = sg > 0 ? 4.5 : 0;
         for (let n = Math.ceil((clo - poff) / 9); n * 9 + poff <= chi; n++) {
-          const sl = n * 9 + poff; const st = stageAt(sl); if (st === 'city' || nearBoundary(sl, 6)) continue;
+          const sl = n * 9 + poff; const st = stAt(sl); if (st === 'city' || nearBoundary(sl, 6)) continue;
           const sd = n * 13 + sg * 5; const list = PROPS[st]; const kind = list[Math.floor(hash(sd) * list.length)];
           const pool = propPools[kind]; const u = propUse[kind] ?? 0; if (u >= pool.length) continue; propUse[kind] = u + 1;
           const pg = pool[u]; at(g, sl, sg * (HW + SW * 0.62));
           pg.visible = true; pg.position.set(P.x, 0.2 + g.y, P.z); pg.rotation.set(0, g.yaw + (sg < 0 ? 0 : Math.PI), 0);
         }
+        // route dressing on this side's sidewalk
+        for (let n = Math.ceil((clo - (sg > 0 ? 6 : 0)) / 12); n * 12 + (sg > 0 ? 6 : 0) <= chi; n++) {
+          const sl = n * 12 + (sg > 0 ? 6 : 0); if (nearBoundary(sl, 6)) continue;
+          const rid = routeAt(sl); if (rid === 'boulevard') continue;
+          const pool = routePools[rid]; if (routeUse[rid] >= pool.length) continue;
+          const rg = pool[routeUse[rid]++]; at(g, sl, sg * (HW + SW * 0.45));
+          rg.visible = true; rg.position.set(P.x, 0.2 + g.y, P.z); rg.rotation.set(0, g.yaw + (sg < 0 ? 0 : Math.PI), 0);
+        }
+        // campaign sidewalk dressing + wayfinding
+        const putG: Placer = (sl2, lat) => { at(g, sl2, lat); Q.x = P.x; Q.z = P.z; Q.y = g.y; Q.yaw = g.yaw; return Q; };
+        scenery.dress(clo, chi, sg, putG);
         // wall signs + police strobes / hospital wall lights
         for (let n = Math.ceil((clo - (sg > 0 ? 18 : 0)) / 36); n * 36 + (sg > 0 ? 18 : 0) <= chi; n++) {
-          const sl = n * 36 + (sg > 0 ? 18 : 0); const st = stageAt(sl); if (st === 'city' || nearBoundary(sl, 8)) continue;
+          const sl = n * 36 + (sg > 0 ? 18 : 0); const st = stAt(sl); if (st === 'city' || nearBoundary(sl, 8)) continue;
           const pool = signPools[st]; if (signUse[st] >= pool.length) continue;
           const sgG = pool[signUse[st]++]; at(g, sl, sg * (FW - 0.04));
           sgG.visible = true; sgG.position.set(P.x, 4.0 + g.y, P.z); sgG.rotation.set(0, g.yaw - sg * Math.PI / 2, 0);
         }
         for (let n = Math.ceil(clo / 14); n * 14 <= chi && sb < strobes.length; n++) {
-          const sl = n * 14 + (sg > 0 ? 7 : 0); const st = stageAt(sl); if (st === 'city' || sl > chi || nearBoundary(sl, 4)) continue;
+          const sl = n * 14 + (sg > 0 ? 7 : 0); const st = stAt(sl); if (st === 'city' || sl > chi || nearBoundary(sl, 4)) continue;
           const m = strobes[sb++]; at(g, sl, sg * (FW - 0.06));
           m.visible = true; m.position.set(P.x, 5.2 + g.y, P.z); m.rotation.set(0, g.yaw, 0);
           m.material = st === 'police' ? (((n + Math.floor(s.time * 3)) & 1) ? copRed : copBlue) : (n & 1 ? exitGreen : crossRed);
         }
       }
       // ceiling light panels down the corridor centre
-      if (k > 0) {
+      {
         const la = Math.max(g.from, g.sC !== null ? g.sC - HW : -Infinity); const lb = Math.min(g.to, g.eC !== null ? g.eC + HW : Infinity);
+        scenery.overhead(la, lb, (sl2, lat) => { at(g, sl2, lat); Q.x = P.x; Q.z = P.z; Q.y = g.y; Q.yaw = g.yaw; return Q; });
         for (let n = Math.ceil(la / 8); n * 8 <= lb && cl < ceilLights.length; n++) {
-          if (stageAt(n * 8) === 'city' || nearBoundary(n * 8, 2)) continue;
+          if (stAt(n * 8) === 'city' || nearBoundary(n * 8, 2)) continue;
           const m = ceilLights[cl++]; at(g, n * 8, 0);
           m.visible = true; m.position.set(P.x, 6.36 + g.y * 4, P.z); m.rotation.set(0, g.yaw, 0);
         }
@@ -509,11 +603,13 @@ function createEngine(gl: ExpoWebGLRenderingContext, w: number, h: number) {
     for (let i = ci2; i < cars.length; i++) cars[i].g.visible = false;
     for (let i = cl; i < ceilLights.length; i++) ceilLights[i].visible = false;
     for (let i = sb; i < strobes.length; i++) strobes[i].visible = false;
+    for (const k of ['alley', 'collapsed'] as const) { const pool = routePools[k]; for (let i = routeUse[k]; i < pool.length; i++) pool[i].visible = false; }
     for (const k in propPools) { const pool = propPools[k]; for (let i = propUse[k] ?? 0; i < pool.length; i++) pool[i].visible = false; }
     for (const st of ['police', 'hospital'] as const) { const pool = signPools[st]; for (let i = signUse[st]; i < pool.length; i++) pool[i].visible = false; }
     // stage entrance portal (nearest boundary ahead, or just behind)
-    const B = Math.ceil((d - 12) / STAGE_LEN) * STAGE_LEN;
-    const bst = stageAt(B);
+    let B = Math.ceil((d - 12) / STAGE_LEN) * STAGE_LEN;
+    if (bounds) { B = -1; for (const x of bounds) if (x >= d - 12) { B = x; break; } }
+    const bst = stAt(B);
     for (const st of ['city', 'police', 'hospital'] as const) {
       const pg = portals[st];
       if (st !== bst || B <= 0 || B - d > VIS + 20 || Math.abs(B - J.s) < 16 || (L && Math.abs(B - L.s) < 16)) { pg.visible = false; continue; }
@@ -521,40 +617,50 @@ function createEngine(gl: ExpoWebGLRenderingContext, w: number, h: number) {
       pg.visible = true; pg.position.set(P.x, sg.y, P.z); pg.rotation.set(0, sg.yaw, 0);
     }
     // fog/clear colour eases into the stage the runner is in
-    const curSt = stageAt(d); const into = (((d % STAGE_LEN) + STAGE_LEN) % STAGE_LEN);
-    const prevSt = stageAt(d - into - 1);
+    const curSt = stAt(d); let into = (((d % STAGE_LEN) + STAGE_LEN) % STAGE_LEN);
+    if (bounds) { into = d + 1000; for (const x of bounds) if (x <= d) into = d - x; }
+    const prevSt = stAt(d - into - 1);
     fogNow.copy(FOG[prevSt]).lerp(FOG[curSt], Math.min(1, into / 30));
+    const md = scenery.mood(fogNow); fogNow.copy(md.fog);
+    hemiL.intensity = 1.25 * md.light; sunL.intensity = 1.6 * md.light; rim.intensity = 0.35 * Math.max(0.6, md.light);
     (scn.fog as THREE.Fog).color.copy(fogNow); renderer.setClearColor(fogNow);
     // asphalt cracks on city streets only
     const crA = Math.max(d - 10, L ? L.s + HW : -Infinity); const crB = Math.min(d + 80, J.s - HW);
     for (let i = 0; i < cracks.length; i++) {
       const sl = Math.ceil(crA / 9) * 9 + i * 9; const cm = cracks[i];
-      if (sl > crB || stageAt(sl) !== 'city') { cm.visible = false; continue; }
+      if (sl > crB || stAt(sl) !== 'city') { cm.visible = false; continue; }
       const sd = Math.round(sl / 9) * 7;
       cm.visible = true; cm.position.set((hash(sd) - 0.5) * LW * 2.6, 0.012, -(sl - d));
       cm.rotation.set(-Math.PI / 2, 0, hash(sd + 3) * 3); cm.scale.set(0.4 + hash(sd + 1) * 1.2, 0.15 + hash(sd + 2) * 0.6, 1);
     }
     // junction props
-    const jset: [Seg, number, number][] = [];
-    if (J.s - d < VIS + 10) jset.push([cur, J.s, J.dir]);
-    if (prv.on && L) jset.push([prv, L.s, L.dir]);
+    const jset: [Seg, number, number, boolean][] = [];
+    if (J.s - d < VIS + 10) jset.push([cur, J.s, J.dir, !!J.branch]);
+    if (prv.on && L) jset.push([prv, L.s, L.dir, !!L.branch]);
     for (let i = 0; i < junctions.length; i++) {
       const jn = junctions[i]; const e = jset[i];
       if (!e) { jn.g.visible = false; continue; }
-      at(e[0], e[1], 0); jn.g.visible = true; jn.g.position.set(P.x, e[0].y, P.z); jn.g.rotation.set(0, e[0].yaw, 0); jn.mir.scale.x = e[2];
+      at(e[0], e[1], 0); jn.g.visible = true; jn.g.position.set(P.x, e[0].y, P.z); jn.g.rotation.set(0, e[0].yaw, 0); jn.mir.scale.x = e[2]; jn.mir2.visible = e[3]; jn.mir2.scale.x = -e[2];
     }
     for (let i = 0; i < smokes.length; i++) smokes[i].rotation.y = s.time * 0.05 * (i + 1);
 
     // obstacles
     obCount.fill(0);
+    const lit = s.flashlightT > 0; let ti = 0;
     for (const o of s.obstacles) {
       const z = o.s - d;
       if (z > VIS + 30 || z < -8) continue;
-      const pi = themed.poolIndex(o.s, o.id, o.type);
+      if (z > 2 && z < (lit ? 70 : 45) && ti < tels.length) {
+        const tm = tels[ti++]; const sgT = segOf(o.s - 1.6); at(sgT, o.s - 1.6, o.lane * LW);
+        tm.visible = true; tm.material = lit ? telLitM : telM; tm.position.set(P.x, 0.03 + sgT.y, P.z); tm.rotation.set(-Math.PI / 2, 0, sgT.yaw);
+      }
+      const pi = s.campaign ? simObstaclePoolIndex(s, o.s, o.id, o.type) : themed.poolIndex(o.s, o.id, o.type);
       const g = obPools[pi][obCount[pi]++]; if (!g) continue;
       const sg2 = segOf(o.s); at(sg2, o.s, o.lane * LW);
       g.visible = true; g.position.set(P.x, sg2.y, P.z); g.rotation.y = sg2.yaw;
     }
+    for (let i = ti; i < tels.length; i++) tels[i].visible = false;
+    telM.opacity = 0.18 + 0.08 * Math.sin(s.time * 6); telLitM.opacity = 0.5 + 0.15 * Math.sin(s.time * 8);
     for (let p = 0; p < obPools.length; p++) { const pl = obPools[p]; for (let i = obCount[p]; i < pl.length; i++) pl[i].visible = false; }
     let ci = 0;
     for (const c of s.coins) {
@@ -563,6 +669,15 @@ function createEngine(gl: ExpoWebGLRenderingContext, w: number, h: number) {
       const g = supPool[ci++]; g.visible = true; g.position.set(P.x, c.h, P.z); g.rotation.y = s.time * 3 + c.id;
     }
     for (let i = ci; i < supPool.length; i++) supPool[i].visible = false;
+    pickUse.shield = 0; pickUse.flashlight = 0; pickUse.distraction = 0;
+    for (const pk of s.pickups) {
+      const z = pk.s - d; if (pk.taken || z > VIS * 0.85 || z < -3) continue;
+      const pool = pickPools[pk.type]; if (!pool || pickUse[pk.type] >= pool.length) continue;
+      const it = pool[pickUse[pk.type]++]; const sgP = segOf(pk.s); at(sgP, pk.s, pk.lane * LW);
+      it.g.visible = true; it.g.position.set(P.x, 1.0 + Math.sin(s.time * 3 + pk.id) * 0.12 + sgP.y, P.z); it.g.rotation.y = s.time * 2.2 + pk.id;
+      it.halo.visible = true; it.halo.position.set(P.x, 0.035 + sgP.y, P.z); it.halo.scale.setScalar(1 + 0.15 * Math.sin(s.time * 5 + pk.id));
+    }
+    for (const t of ['shield', 'flashlight', 'distraction'] as const) { const pool = pickPools[t]; for (let i = pickUse[t]; i < pool.length; i++) { pool[i].g.visible = false; pool[i].halo.visible = false; } }
     for (let i = 0; i < ringPool.length; i++) {
       const p = s.pops[i]; const r = ringPool[i];
       if (!p) { r.visible = false; continue; }
@@ -571,12 +686,25 @@ function createEngine(gl: ExpoWebGLRenderingContext, w: number, h: number) {
     }
 
     // survivor
+    const want = survRigs[s.outfit as OutfitLook] ?? survRigs.scout;
+    if (want !== surv) { surv.root.visible = false; surv = want; surv.root.visible = true; }
     const sx = s.px * LW;
     const fallen = s.deathCause === 'gap' && (s.mode === 'dying' || s.mode === 'over');
     surv.root.position.set(sx, fallen ? Math.min(0, s.jy) * 0.7 : Math.max(0, s.jy), 0);
     animateSurvivor(surv, s);
     survShadow.position.x = sx; survShadow.visible = !fallen;
     survShadow.scale.setScalar(1 - Math.min(0.6, s.jy / 4));
+    const alive = s.mode === 'run' || s.mode === 'paused';
+    bubble.visible = alive && s.shieldT > 0 && (s.shieldT > 2 || Math.sin(s.time * 20) > 0);
+    if (bubble.visible) { bubble.position.set(sx, Math.max(0, s.jy) + 0.95, 0); bubble.rotation.y = s.time * 0.8; bubbleM.opacity = 0.14 + 0.06 * Math.sin(s.time * 5); }
+    const beamOn = alive && s.flashlightT > 0 && (s.flashlightT > 2 || Math.sin(s.time * 16) > -0.3);
+    beamCone.visible = beamOn; lightPool.visible = beamOn;
+    if (beamOn) { beamCone.position.set(sx, 1.3, -8.6); lightPool.position.set(sx, 0.04, -9); beamM.opacity = 0.08 + 0.02 * Math.sin(s.time * 9); }
+    // invulnerability blink after a stumble
+    surv.root.visible = !(s.invulnerableT > 0 && s.mode === 'run' && Math.sin(s.time * 30) > 0.4);
+
+    // campaign: items, carried item, escort, beacon, destination, gantries
+    scenery.update(s, placeG, surv.torso, sx, (x) => Math.abs(x - J.s) < 16 || (!!L && Math.abs(x - L.s) < 16));
 
     // corner swing: survivor snaps toward the new street, camera/world eases around the survivor
     const swingT = L && s.turnFx < SWING ? ease(Math.min(1, s.turnFx / SWING)) : 1;
@@ -588,6 +716,10 @@ function createEngine(gl: ExpoWebGLRenderingContext, w: number, h: number) {
     // horde follows the path, including around the last corner
     const dying = s.mode === 'dying' || s.mode === 'over';
     const lunge = dying ? Math.min(1, s.dieT * 1.5) : 0;
+    const reach = dying ? lunge : Math.max(0, Math.min(0.75, (2.4 - s.horde) / 1.6));
+    const distracted = s.distractionT > 0 && !dying;
+    flareG.visible = distracted;
+    if (distracted) { const fz = d - Math.max(1.5, s.horde - 1.2); const fg = segOf(fz); at(fg, fz, 0); flareG.position.set(P.x, fg.y, P.z); flareGlowM.opacity = 0.22 + 0.12 * Math.abs(Math.sin(s.time * 13)); }
     for (let i = 0; i < zombies.length; i++) {
       const z = zombies[i];
       const back = s.horde + z.off * (dying ? 1 - lunge * 0.6 : 1);
@@ -595,8 +727,8 @@ function createEngine(gl: ExpoWebGLRenderingContext, w: number, h: number) {
       const zs = d - back; const g = segOf(zs); at(g, zs, lat);
       const t = s.time * (5.2 + i * 0.4) + z.ph;
       z.r.root.position.set(P.x, g.y, P.z);
-      z.r.root.rotation.y = g.yaw + Math.atan2(-(sx - lat), 4) * 0.4;
-      animateZombie(z.r, z.gait, t, lunge);
+      z.r.root.rotation.y = g.yaw + (distracted ? (i & 1 ? 0.9 : -0.9) + Math.sin(t * 0.3) * 0.2 : Math.atan2(-(sx - lat), 4) * 0.4);
+      animateZombie(z.r, z.gait, t, distracted ? 0 : reach);
       z.sh.position.set(P.x, 0.02 + g.y, P.z);
     }
 
@@ -611,18 +743,8 @@ function createEngine(gl: ExpoWebGLRenderingContext, w: number, h: number) {
       const g = segOf(wk.s); at(g, wk.s, wk.lane * LW);
       const caught = dying && s.deathCause === 'walker' && Math.abs(z) < 1.5;
       slot.r.root.visible = true; slot.r.root.position.set(P.x, g.y, P.z); slot.r.root.rotation.y = g.yaw + Math.PI;
-      animateZombie(slot.r, slot.gait, s.time * (4 + wk.v * 0.6) + wk.id, caught ? lunge : 0);
-      if (!caught) {
-        // Incoming infected charge on a straight trajectory, rather than dragging a leg.
-        const stride = Math.sin(s.time * (7 + wk.v) + wk.id);
-        slot.r.hips.position.y = 0.95 + Math.abs(stride) * 0.075;
-        slot.r.legL.rotation.x = stride * 0.9;
-        slot.r.legR.rotation.x = -stride * 0.9;
-        slot.r.shinL.rotation.x = -0.2 - Math.max(0, -stride) * 1.2;
-        slot.r.shinR.rotation.x = -0.2 - Math.max(0, stride) * 1.2;
-        slot.r.armL.rotation.x = 0.6 - stride * 0.65;
-        slot.r.armR.rotation.x = 0.6 + stride * 0.65;
-      }
+      if (caught) animateZombie(slot.r, slot.gait, s.time * (4 + wk.v * 0.6) + wk.id, lunge);
+      else animateZombieCharge(slot.r, slot.gait, s.time * (7 + wk.v) + wk.id);
       slot.sh.visible = true; slot.sh.position.set(P.x, 0.02 + g.y, P.z);
     }
     for (const pool of walkerPools) for (const w of pool) if (!w.used) { w.r.root.visible = false; w.sh.visible = false; }
@@ -647,6 +769,16 @@ function createEngine(gl: ExpoWebGLRenderingContext, w: number, h: number) {
     if (!isWeb) gl.endFrameEXP();
   };
   const endIntro = () => { if (intro) { intro.dispose(); intro = null; } };
+  let cut: MissionCutscene | null = null;
+  const renderMissionCutscene = (id: number, t: number) => {
+    if (cut && cut.id !== id) { cut.dispose(); cut = null; }
+    if (!cut) cut = createMissionCutscene(id);
+    cut.update(t, W / Math.max(1, H));
+    renderer.setClearColor(cut.clear);
+    renderer.render(cut.scene, cut.cam);
+    if (!isWeb) gl.endFrameEXP();
+  };
+  const endMissionCutscene = () => { if (cut) { cut.dispose(); cut = null; } };
 
   const resize = (nw: number, nh: number) => {
     W = nw; H = nh;
@@ -658,12 +790,12 @@ function createEngine(gl: ExpoWebGLRenderingContext, w: number, h: number) {
   resize(W, H);
 
   const dispose = () => {
-    endIntro();
+    endIntro(); endMissionCutscene(); scenery.dispose();
     for (const g of geos) g.dispose();
     for (const m of mats) m.dispose();
     renderer.dispose();
   };
-  return { render, renderIntro, endIntro, resize, dispose };
+  return { render, renderIntro, endIntro, renderMissionCutscene, endMissionCutscene, resize, dispose };
 }
 
 type Engine = ReturnType<typeof createEngine>;
@@ -696,6 +828,14 @@ export function RunnerScene({ width, height, onReady }: Props) {
           }
         },
         endIntro: () => { try { eng.endIntro(); } catch {} },
+        renderMissionCutscene: (id, t) => {
+          if (failed) return;
+          try { eng.renderMissionCutscene(id, t); } catch (e) {
+            failed = true; onReadyRef.current(null);
+            setError(e instanceof Error ? e.message : 'The renderer stopped responding.');
+          }
+        },
+        endMissionCutscene: () => { try { eng.endMissionCutscene(); } catch {} },
       });
     } catch (e) {
       onReadyRef.current(null);

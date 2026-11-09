@@ -4,9 +4,9 @@ import { Accelerometer } from 'expo-sensors';
 import { tiltLane, type TiltLane } from '@/lib/tilt';
 
 type Status = 'idle' | 'ready' | 'calibrating' | 'unavailable' | 'denied' | 'error';
-interface Options { enabled: boolean; onLane: (lane: TiltLane) => void }
+interface Options { enabled: boolean; onLane: (lane: TiltLane) => void; sensitivity?: number }
 
-export function useTiltControls({ enabled, onLane }: Options) {
+export function useTiltControls({ enabled, onLane, sensitivity = 1 }: Options) {
   const [status, setStatus] = useState<Status>(Platform.OS === 'web' ? 'unavailable' : 'idle');
   const [message, setMessage] = useState(
     Platform.OS === 'web' ? 'Tilt is available in the iPhone app. Use arrows or touch controls here.' : 'Hold your phone comfortably to calibrate steering.',
@@ -15,6 +15,7 @@ export function useTiltControls({ enabled, onLane }: Options) {
   const [attempt, setAttempt] = useState(0);
   const onLaneRef = useRef(onLane);
   onLaneRef.current = onLane;
+  const sensitivityRef = useRef(sensitivity); sensitivityRef.current = sensitivity;
   const requestPermission = useRef(false);
   const mounted = useRef(true);
 
@@ -101,7 +102,7 @@ export function useTiltControls({ enabled, onLane }: Options) {
             return;
           }
           filtered += (x - filtered) * 0.22;
-          const nextLane = tiltLane(filtered - baseline);
+          const nextLane = tiltLane(filtered - baseline, sensitivityRef.current);
           // Reapply to fresh runs even when the phone has not moved.
           onLaneRef.current(nextLane);
         });

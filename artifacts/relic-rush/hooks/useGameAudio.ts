@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { AppState, Platform } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { createAudioPlayer, setAudioModeAsync, type AudioPlayer } from 'expo-audio';
+import { superviseLoop } from '@/lib/loopPlayback';
 
 export type Sfx = 'jump' | 'slide' | 'pickup' | 'turn' | 'hit' | 'stage';
 const SFX_SRC: Record<Sfx, number> = {
@@ -21,24 +22,40 @@ const KEY = 'relicrush.audio.v1';
 export interface AudioPrefs { music: boolean; sfx: boolean }
 
 /** Gameplay music + SFX. `musicActive` should be true only during an actual (unpaused) run while the app is foregrounded. */
-export function useGameAudio(musicActive: boolean) {
+export function useGameAudio(musicActive: boolean, threat = 0) {
   const [prefs, setPrefs] = useState<AudioPrefs>({ music: true, sfx: true });
   const [error, setError] = useState<string | null>(null);
   const prefsRef = useRef(prefs); prefsRef.current = prefs;
   const musicRef = useRef<AudioPlayer | null>(null);
+  const loopRef = useRef<ReturnType<typeof superviseLoop> | null>(null);
+  const [ready, setReady] = useState(false);
+  const pursuitRef = useRef<AudioPlayer | null>(null);
   const sfxRef = useRef<Partial<Record<Sfx, AudioPlayer>>>({});
   const lastRef = useRef<Partial<Record<Sfx, number>>>({});
-  const [fg, setFg] = useState(AppState.currentState === 'active');
+  const [fg, setFg] = useState(AppState.currentState !== 'background' && AppState.currentState !== 'inactive');
   const activeRef = useRef(musicActive && fg);
   activeRef.current = musicActive && fg;
 
   // create players once; release on unmount
   useEffect(() => {
-    setAudioModeAsync({ playsInSilentMode: true, interruptionMode: 'mixWithOthers', allowsRecording: false, shouldPlayInBackground: false }).catch(() => {});
+    let mounted = true;
+    setAudioModeAsync({ playsInSilentMode: true, interruptionMode: 'mixWithOthers', allowsRecording: false, shouldPlayInBackground: false })
+      .then(() => { if (mounted) setReady(true); })
+      .catch(() => { if (mounted) setError('Audio session could not start. Pause and resume to retry sound.'); });
+    let musicStatus: { remove(): void } | undefined;
     try {
-      const m = createAudioPlayer(require('@/assets/audio/game-music.mp3'));
+      // Cache the whole bundled track before playback instead of streaming from Metro.
+      const m = createAudioPlayer(require('@/assets/audio/game-music.mp3'), { downloadFirst: true, updateInterval: 500 });
       m.loop = true; m.volume = MUSIC_VOL;
       musicRef.current = m;
+      const loop = superviseLoop(m, () => {
+        if (mounted) setError('Music was interrupted. Pause and resume to retry sound.');
+      });
+      loopRef.current = loop;
+      musicStatus = m.addListener('playbackStatusUpdate', () => loop.tick());
+      const pursuit = createAudioPlayer(require('@/assets/audio/sfx-pursuit.wav'), { downloadFirst: true });
+      pursuit.loop = true; pursuit.volume = 0;
+      pursuitRef.current = pursuit;
       for (const k of Object.keys(SFX_SRC) as Sfx[]) {
         const p = createAudioPlayer(SFX_SRC[k]);
         p.volume = SFX_VOL[k];
@@ -53,23 +70,48 @@ export function useGameAudio(musicActive: boolean) {
       setPrefs({ music: p.music !== false, sfx: p.sfx !== false });
     }).catch(() => setError('Sound settings could not be read; using defaults.'));
     const sub = AppState.addEventListener('change', (st) => setFg(st === 'active'));
+    // Native interruptions can stop playback without changing React's run state.
+    const recovery = setInterval(() => loopRef.current?.tick(), 1500);
     return () => {
+      mounted = false;
+      clearInterval(recovery);
       sub.remove();
+      musicStatus?.remove();
+      loopRef.current?.dispose();
+      loopRef.current = null;
       try { musicRef.current?.pause(); musicRef.current?.remove(); } catch {}
+      try { pursuitRef.current?.pause(); pursuitRef.current?.remove(); } catch {}
       for (const p of Object.values(sfxRef.current)) { try { p?.pause(); p?.remove(); } catch {} }
-      musicRef.current = null; sfxRef.current = {};
+      musicRef.current = null; pursuitRef.current = null; sfxRef.current = {};
     };
   }, []);
 
   // music follows run state; resumes from where it paused
-  const shouldPlay = musicActive && fg && prefs.music;
+  const shouldPlay = musicActive && fg && prefs.music && ready;
+  useEffect(() => {
+    if (ready || !musicActive || !fg) return;
+    let current = true;
+    setAudioModeAsync({ playsInSilentMode: true, interruptionMode: 'mixWithOthers', allowsRecording: false, shouldPlayInBackground: false })
+      .then(() => { if (current) setReady(true); })
+      .catch(() => { if (current) setError('Audio session could not start. Pause and resume to retry sound.'); });
+    return () => { current = false; };
+  }, [ready, musicActive, fg]);
   useEffect(() => {
     const m = musicRef.current; if (!m) return;
     try {
-      if (shouldPlay) { m.volume = MUSIC_VOL; if (!m.playing) m.play(); }
-      else if (m.playing) m.pause();
+      m.volume = MUSIC_VOL;
+      loopRef.current?.setWanted(shouldPlay);
     } catch { setError('Music playback failed. The run works silently.'); }
   }, [shouldPlay]);
+
+  useEffect(() => {
+    const p = pursuitRef.current; if (!p) return;
+    try {
+      p.volume = Math.min(1, Math.max(0, threat)) * 0.7;
+      if (musicActive && fg && prefs.sfx && threat > 0.02) { if (!p.playing) p.play(); }
+      else p.pause();
+    } catch { setError('Pursuit audio could not play. Gameplay is unaffected.'); }
+  }, [musicActive, fg, prefs.sfx, threat]);
 
   useEffect(() => {
     if (!musicActive || !fg || !prefs.sfx) {
@@ -82,7 +124,7 @@ export function useGameAudio(musicActive: boolean) {
   /** new run: restart the loop from the top (call from the button press so web treats it as a user gesture) */
   const restartMusic = useCallback(() => {
     const m = musicRef.current; if (!m) return;
-    m.seekTo(0).catch(() => {});
+    void loopRef.current?.restart();
     if (Platform.OS === 'web' && prefsRef.current.music && !m.playing) {
       // unlock autoplay inside the gesture; the state effect keeps it in sync afterwards
       try { m.play(); } catch { setError('Browser blocked audio. Tap RUN again to enable sound.'); }
@@ -90,7 +132,7 @@ export function useGameAudio(musicActive: boolean) {
   }, []);
 
   /** web gesture unlock without audible playback (e.g. before the intro) */
-  const pauseNow = useCallback(() => { try { musicRef.current?.pause(); } catch {} }, []);
+  const pauseNow = useCallback(() => { loopRef.current?.setWanted(false); }, []);
 
   const play = useCallback((k: Sfx) => {
     if (!prefsRef.current.sfx || !activeRef.current) return;

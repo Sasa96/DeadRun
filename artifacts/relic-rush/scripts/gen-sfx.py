@@ -31,3 +31,15 @@ write('sfx-turn', mix(sweep(0.14, 520, 780, 'sin'), [0] * int(R * 0.05) + sweep(
 hit = mix(sweep(0.55, 140, 38, noise=0.35, curve=2.2), lowpass(sweep(0.4, 400, 100, noise=1.0, curve=3), 0.15))
 write('sfx-hit', hit, 0.6)
 write('sfx-stage', mix(sweep(0.9, 196, 196, 'sin', curve=1.6), sweep(0.9, 294, 296, 'sin', curve=1.6), [0] * int(R * 0.18) + sweep(0.7, 392, 392, 'sin', curve=2)), 0.4)
+# A short reusable pursuit loop: paired shoe impacts and filtered breathing.
+pursuit = [0.0] * int(R * 1.6)
+for at in [0, 0.29, 0.64, 0.93, 1.28]:
+    foot = mix(sweep(0.12, 85, 35, 'sin', noise=0.25), lowpass(sweep(0.09, 180, 60, noise=1), 0.1))
+    for i, v in enumerate(foot):
+        j = int(at * R) + i
+        if j < len(pursuit): pursuit[j] += v * 0.65
+breath = lowpass([random.uniform(-1, 1) for _ in pursuit], 0.04)
+for i in range(len(pursuit)):
+    t = i / R
+    pursuit[i] += breath[i] * math.sin(math.pi * t / 1.6) ** 2 * 0.7
+write('sfx-pursuit', pursuit, 0.46)

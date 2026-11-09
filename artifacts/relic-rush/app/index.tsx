@@ -1,27 +1,40 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { Animated, AppState, Easing, PanResponder, Platform, Pressable, ScrollView, StyleSheet, Text, View, useWindowDimensions } from 'react-native';
+import { Animated, AppState, BackHandler, Easing, PanResponder, Platform, Pressable, ScrollView, StyleSheet, Text, View, useWindowDimensions } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Feather, MaterialCommunityIcons } from '@expo/vector-icons';
 import * as Haptics from 'expo-haptics';
 import colors from '@/constants/colors';
 import { RunnerScene, type SceneApi } from '@/components/RunnerScene';
-import { actions, advance, difficulty, stageAt, newSim, requestTurn, setLane, stageInfo, steer, turnInfo, START_SPEED, MAX_SPEED, STAGE_NAMES, type Sim, type Mode, type StageId, type TurnDir } from '@/lib/game';
+import { actions, advance, simDifficulty, routeInfo, simStageAt, newMissionSim, newSim, requestTurn, setLane, stageInfo, steer, turnInfo, START_SPEED, MAX_SPEED, STAGE_NAMES, type Sim, type Mode, type StageId, type TurnDir } from '@/lib/game';
 import { INTRO_LEN, introCaption, newIntro, skipIntro, stepIntro, type IntroCaption } from '@/lib/intro';
 import { useProgress } from '@/context/ProgressContext';
 import { useTiltControls } from '@/hooks/useTiltControls';
 import { useIntroSound } from '@/hooks/useIntroSound';
 import { useGameAudio, type AudioPrefs } from '@/hooks/useGameAudio';
+import { HordeMeter, POWER, PowerChips, SensitivityRow, Toast, type PowerType } from '@/components/Loadout';
+import { TrophyMenu, TrophyReveal } from '@/components/TrophyMenu';
+import { CampaignMap, CutsceneOverlay, MissionHud, MissionSaveError, MissionSaving, MissionSuccess, ModeChooser, type MissionHudData } from '@/components/CampaignUI';
+import { cutsceneLength } from '@/components/campaignMeta';
+import { missionById, missionObjective, missionSection, missionUnlocked } from '@/lib/campaign';
 
 const T = colors.light;
 type Act = 'left' | 'right' | 'jump' | 'slide';
 type Ctl = 'tilt' | 'touch';
-interface HudTurn { dir: TurnDir; dist: number; open: boolean; armed: -1 | 0 | 1 }
-interface Hud { dist: number; coins: number; speed: number; turn: HudTurn | null; stage: StageId; stageName: string; stageProg: number; next: StageId; toNext: number; tier: number; threat: string }
+interface HudTurn { dir: TurnDir; dist: number; open: boolean; armed: -1 | 0 | 1; branch: boolean }
+interface Hud { dist: number; coins: number; speed: number; turn: HudTurn | null; stage: StageId; stageName: string; stageProg: number; next: StageId; toNext: number; tier: number; threat: string; horde: number; shield: number; flashlight: number; distraction: number; route: string; routeId: string; mission: MissionHudData | null }
 function hudOf(s: Sim): Hud {
   const ti = turnInfo(s);
   const st = stageInfo(s.dist);
-  const df = difficulty(s.dist);
-  return { tier: df.tier, threat: df.name, stage: st.id, stageName: st.name, stageProg: st.progress, next: st.next, toNext: Math.ceil(st.remaining), dist: Math.floor(s.dist), coins: s.coinsRun, speed: s.speed, turn: s.mode === 'run' && ti.warn ? { dir: ti.dir, dist: Math.max(0, Math.ceil(ti.dist)), open: ti.open, armed: ti.armed } : null };
+  const df = simDifficulty(s);
+  const rt = routeInfo(s.dist);
+  const c = s.campaign;
+  let mission: MissionHudData | null = null;
+  if (c) {
+    const m = missionById(c.id);
+    mission = { id: c.id, title: m.title, objective: missionObjective(c, s.dist), section: missionSection(c, s.dist).name, item: m.item, itemName: m.itemName, collected: c.collected,
+      recovering: c.recoveries > 0 && !c.collected, progress: Math.max(0, Math.min(1, s.dist / Math.max(1, c.finish))), activating: c.activationT > 0 };
+  }
+  return { mission, horde: s.horde, shield: s.shieldT, flashlight: s.flashlightT, distraction: s.distractionT, route: rt.name, routeId: rt.id, tier: df.tier, threat: df.name, stage: st.id, stageName: st.name, stageProg: st.progress, next: st.next, toNext: Math.ceil(st.remaining), dist: Math.floor(s.dist), coins: s.coinsRun, speed: s.speed, turn: s.mode === 'run' && ti.warn ? { dir: ti.dir, dist: Math.max(0, Math.ceil(ti.dist)), open: ti.open, armed: ti.armed, branch: !!s.turn.branch } : null };
 }
 
 function haptic(kind: 'light' | 'heavy' | 'success') {
@@ -60,24 +73,44 @@ export default function Game() {
   const top = Math.max(insets.top, Platform.OS === 'web' ? 67 : 0);
   const bottom = Math.max(insets.bottom, Platform.OS === 'web' ? 34 : 0);
   const progress = useProgress();
+  const progressLoadedRef = useRef(progress.loaded); progressLoadedRef.current = progress.loaded;
   const isWeb = Platform.OS === 'web';
 
   const simRef = useRef<Sim>(newSim('home'));
+  const missionRef = useRef<number | null>(null);
+  const freshSim = (m: Mode) => (m === 'run' && missionRef.current ? newMissionSim(missionRef.current) : newSim(m));
+  type Menu = 'home' | 'chooser' | 'campaign';
+  const [menu, setMenu] = useState<Menu>('home');
+  const [activeMission, setActiveMission] = useState<number | null>(null);
+  // completion flow: saving -> cutscene -> done | error ; replay cutscenes never touch progress
+  type Phase = 'none' | 'saving' | 'error' | 'cutscene' | 'done';
+  const [phase, setPhase] = useState<Phase>('none');
+  const [saveBusy, setSaveBusy] = useState(false);
+  const completionRef = useRef<{ id: number; seconds: number; dist: number; coins: number; stats: { turns: number; jumps: number; slides: number; pickups: number } } | null>(null);
+  const [completion, setCompletion] = useState<{ id: number; seconds: number; coins: number } | null>(null);
+  const cutRef = useRef<{ id: number; t: number; replay: boolean } | null>(null);
+  const [cut, setCut] = useState<{ id: number; t: number; replay: boolean } | null>(null);
+  const completeRef = useRef(progress.completeMission); completeRef.current = progress.completeMission;
+  const campaignRef = useRef(progress.campaign); campaignRef.current = progress.campaign;
+  const lastRecRef = useRef(0); const lastActRef = useRef(false);
   const sceneRef = useRef<SceneApi | null>(null);
   const appActiveRef = useRef(AppState.currentState === 'active');
   const [sceneReady, setSceneReady] = useState(false);
   const [hud, setHud] = useState<Hud>(() => hudOf(newSim('home')));
   const [mode, setMode] = useState<Mode>('home');
   const [help, setHelp] = useState<boolean>(false);
-  const [ctl, setCtl] = useState<Ctl>(isWeb ? 'touch' : 'tilt');
-  const [result, setResult] = useState<{ dist: number; coins: number; best: boolean; cause: string } | null>(null);
+  const ctl: Ctl = isWeb ? 'touch' : progress.settings.control;
+  const setCtl = useCallback((c: Ctl) => progress.updateSettings({ control: c }), [progress.updateSettings]);
+  const [toast, setToast] = useState<{ text: string; tone: 'good' | 'bad' | 'warn'; icon: React.ComponentProps<typeof Feather>['name']; until: number } | null>(null);
+  const toastRef = useRef(setToast); toastRef.current = setToast;
+  const [result, setResult] = useState<{ dist: number; coins: number; best: boolean; cause: string; turns: number; jumps: number; slides: number; pickups: number } | null>(null);
   const introRef = useRef(newIntro());
   const introSeenRef = useRef(false);
   const [introOn, setIntroOn] = useState(false);
   const [introT, setIntroT] = useState(0);
   const resetClockRef = useRef(false);
   const introSound = useIntroSound(introOn, introT);
-  const audio = useGameAudio(mode === 'run' && !introOn);
+  const audio = useGameAudio(mode === 'run' && !introOn, mode === 'run' ? Math.max(0, Math.min(1, (5 - hud.horde) / 4)) : 0);
   const sfxRef = useRef(audio.play); sfxRef.current = audio.play;
   const stageRef = useRef<StageId>('city');
   const recordRef = useRef(progress.recordRun);
@@ -85,7 +118,7 @@ export default function Game() {
 
   const tiltOn = ctl === 'tilt' && (mode === 'home' || mode === 'run' || mode === 'paused');
   const onLane = useCallback((position: number) => { setLane(simRef.current, position); }, []);
-  const tilt = useTiltControls({ enabled: tiltOn, onLane });
+  const tilt = useTiltControls({ enabled: tiltOn, onLane, sensitivity: progress.settings.sensitivity });
   const tiltBroken = tilt.status === 'unavailable' || tilt.status === 'denied' || tilt.status === 'error';
   const usingTilt = ctl === 'tilt' && !tiltBroken && tilt.status === 'ready';
   const showPad = !usingTilt;
@@ -118,6 +151,17 @@ export default function Game() {
         raf = requestAnimationFrame(tick);
         return;
       }
+      if (cutRef.current) {
+        const ct = cutRef.current;
+        ct.t += elapsed;
+        if (ct.t >= cutsceneLength(ct.id)) endCutRef.current();
+        else {
+          sceneRef.current.renderMissionCutscene(ct.id, ct.t);
+          if (now - hudAt > 100) { hudAt = now; setCut({ ...ct }); }
+        }
+        raf = requestAnimationFrame(tick);
+        return;
+      }
       if (introActiveRef.current) {
         const ist = introRef.current;
         if (stepIntro(ist, elapsed)) finishRef.current();
@@ -130,28 +174,55 @@ export default function Game() {
       }
       const s = simRef.current;
       const prev = s.mode;
-      if (s.mode !== 'paused' && s.mode !== 'over') {
+      if (s.mode !== 'paused' && s.mode !== 'over' && s.mode !== 'complete') {
+        const pre0 = s.shieldT, pre1 = s.flashlightT, pre2 = s.distractionT;
         const ev = advance(s, dt);
         if (ev.coin) { haptic('light'); sfxRef.current('pickup'); }
         if (ev.died) { haptic('heavy'); sfxRef.current('hit'); }
         if (ev.turned) sfxRef.current('turn');
+        if (ev.pickup) {
+          haptic('success'); sfxRef.current('pickup');
+          const k: PowerType = s.distractionT > pre2 ? 'distraction' : s.flashlightT > pre1 ? 'flashlight' : s.shieldT > pre0 ? 'shield' : 'shield';
+          toastRef.current({ text: `${POWER[k].label}: ${POWER[k].body}`, tone: 'good', icon: 'zap', until: now + 2600 });
+        }
+        if (ev.stumbled) {
+          haptic('heavy'); sfxRef.current('hit');
+          toastRef.current({ text: 'Stumbled. They are gaining. One more hit while they are close is fatal.', tone: 'warn', icon: 'alert-triangle', until: now + 2400 });
+        }
+        if (ev.missionPickup && s.campaign) {
+          haptic('success'); sfxRef.current('pickup');
+          const m = missionById(s.campaign.id);
+          toastRef.current({ text: m.item === 'survivors' ? 'The Ward C survivors are with you. Every corner you take, they take.' : `${m.itemName} secured. Now reach ${m.destination.toLowerCase()}.`, tone: 'good', icon: 'check-circle', until: now + 3000 });
+        }
+        if (s.campaign) {
+          if (s.campaign.recoveries > lastRecRef.current) {
+            lastRecRef.current = s.campaign.recoveries; haptic('heavy');
+            toastRef.current({ text: 'Missed it. It has been moved 100 m ahead. Follow the green lane; it is clear.', tone: 'warn', icon: 'rotate-cw', until: now + 3200 });
+          }
+          const act = s.campaign.activationT > 0 || s.campaign.activated;
+          if (act && !lastActRef.current) { lastActRef.current = true; sfxRef.current('stage'); toastRef.current({ text: 'Beacon powering up. Keep running for the pier.', tone: 'good', icon: 'radio', until: now + 2800 }); }
+        }
+        if (ev.completed) completeOnceRef.current();
         if (s.mode === 'run') {
-          const sid = stageAt(s.dist);
+          const sid = simStageAt(s, s.dist);
           if (sid !== stageRef.current) { stageRef.current = sid; sfxRef.current('stage'); }
         }
       }
       if (prev === 'dying' && s.mode === 'over') {
         const dist = Math.floor(s.dist);
-        const best = recordRef.current(dist, s.coinsRun);
-        setResult({ dist, coins: s.coinsRun, best, cause: s.deathCause === 'walker' ? (WALKER_CAUSE[s.deathKind ?? 0] ?? WALKER_CAUSE[0]) : CAUSE[s.deathCause ?? 'gap'] });
+        const stats = { turns: s.turnsTaken, jumps: s.jumps, slides: s.slides, pickups: s.pickupsRun };
+        const best = recordRef.current(dist, s.coinsRun, stats);
+        setToast(null);
+        setResult({ dist, coins: s.coinsRun, best, ...stats, cause: s.deathCause === 'walker' ? (WALKER_CAUSE[s.deathKind ?? 0] ?? WALKER_CAUSE[0]) : CAUSE[s.deathCause ?? 'gap'] });
         setMode('over');
         showOverlay();
       }
       if (s.mode === 'run' && now - hudAt > 100) {
         hudAt = now;
         setHud(hudOf(s));
+        setToast((t) => (t && now > t.until ? null : t));
       }
-      if (s.mode !== 'paused') sceneRef.current?.render(s);
+      if (s.mode !== 'paused' && !cutRef.current) sceneRef.current?.render(s);
       raf = requestAnimationFrame(tick);
     };
     raf = requestAnimationFrame(tick);
@@ -180,19 +251,33 @@ export default function Game() {
     }
     if (actions[a](s)) { haptic('light'); sfxRef.current(a); }
   }, []);
+  const holdRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const holdStop = useCallback(() => { if (holdRef.current) { clearInterval(holdRef.current); holdRef.current = null; } }, []);
+  const holdStart = useCallback((dir: -1 | 1) => {
+    holdStop();
+    doAction(dir < 0 ? 'left' : 'right');
+    holdRef.current = setInterval(() => { const s = simRef.current; if (s.mode !== 'run') return; setLane(s, s.lane + dir * 0.07); }, 33);
+  }, [doAction, holdStop]);
+  useEffect(() => holdStop, [holdStop]);
   const turnPress = useCallback((dir: TurnDir) => {
     const s = simRef.current;
     if (requestTurn(s, dir)) { haptic('success'); setHud(hudOf(s)); }
   }, []);
 
   const startRun = useCallback(() => {
-    if (!sceneRef.current) return;
-    simRef.current = newSim('run');
+    if (!sceneRef.current || !progressLoadedRef.current) return;
+    endCutRef.current(true);
+    simRef.current = freshSim('run');
+    lastRecRef.current = 0; lastActRef.current = false;
+    completionRef.current = null; setCompletion(null); setPhase('none'); setSaveBusy(false);
+    setActiveMission(missionRef.current);
+    setMenu('home');
+    setToast(null);
     stageRef.current = 'city';
     audio.restartMusic();
     setHud(hudOf(simRef.current));
     setResult(null);
-    setHelp(false);
+    setHelp(false); setVault(false);
     setMode('run');
     haptic('success');
   }, [audio.restartMusic]);
@@ -203,21 +288,85 @@ export default function Game() {
     introActiveRef.current = false;
     sceneRef.current?.endIntro();
     setIntroOn(false);
+    // the run chosen before the intro started wins; nothing else may override it
+    missionRef.current = introTargetRef.current;
     startRun();
   }, [startRun]);
   const finishRef = useRef(finishIntro); finishRef.current = finishIntro;
-  const playIntro = useCallback(() => {
-    if (!sceneRef.current || introActiveRef.current) return;
+  const introTargetRef = useRef<number | null>(null);
+  const playIntro = useCallback((target: number | null = null) => {
+    if (!sceneRef.current || introActiveRef.current || cutRef.current) return;
+    introTargetRef.current = target;
     introSeenRef.current = true;
     introRef.current = newIntro();
     resetClockRef.current = true;
     introActiveRef.current = true;
-    setIntroT(0); setHelp(false); setIntroOn(true);
+    setIntroT(0); setHelp(false); setMenu('home'); setIntroOn(true);
   }, []);
   const skip = useCallback(() => { if (skipIntro(introRef.current)) finishIntro(); }, [finishIntro]);
-  const start = useCallback(() => {
-    if (!introSeenRef.current) { audio.restartMusic(); audio.pauseNow(); playIntro(); } else startRun();
+  // Endless: previous behaviour (intro on first run per session)
+  const startEndless = useCallback(() => {
+    if (!progressLoadedRef.current) return;
+    missionRef.current = null;
+    if (!introSeenRef.current) { audio.restartMusic(); audio.pauseNow(); playIntro(null); } else startRun();
   }, [playIntro, startRun, audio.restartMusic, audio.pauseNow]);
+  // Campaign: mission 1 may use the original intro the first time; others start directly
+  const startMission = useCallback((id: number) => {
+    if (!progressLoadedRef.current || !missionUnlocked(campaignRef.current, id)) return;
+    missionRef.current = id;
+    if (id === 1 && !introSeenRef.current) { audio.restartMusic(); audio.pauseNow(); playIntro(1); } else startRun();
+  }, [playIntro, startRun, audio.restartMusic, audio.pauseNow]);
+  const start = useCallback(() => { if (progressLoadedRef.current) setMenu('chooser'); }, []);
+
+  // ---------- mission completion ----------
+  const runSave = useCallback(() => {
+    const c = completionRef.current; if (!c) return;
+    setSaveBusy(true);
+    completeRef.current(c.id, c.seconds, c.dist, c.coins, c.stats).then((ok) => {
+      if (completionRef.current !== c) return;
+      setSaveBusy(false);
+      if (ok) {
+        setPhase('cutscene');
+        resetClockRef.current = true;
+        cutRef.current = { id: c.id, t: 0, replay: false }; setCut({ id: c.id, t: 0, replay: false });
+      } else setPhase('error');
+    }).catch(() => { if (completionRef.current === c) { setSaveBusy(false); setPhase('error'); } });
+  }, []);
+  const completeOnce = useCallback(() => {
+    const s = simRef.current; const c = s.campaign;
+    if (!c || completionRef.current) return;
+    const seconds = Math.max(0.1, Math.round(s.time * 10) / 10);
+    completionRef.current = { id: c.id, seconds, dist: Math.floor(s.dist), coins: s.coinsRun, stats: { turns: s.turnsTaken, jumps: s.jumps, slides: s.slides, pickups: s.pickupsRun } };
+    setCompletion({ id: c.id, seconds, coins: s.coinsRun });
+    setToast(null); holdStop();
+    haptic('success'); sfxRef.current('stage');
+    setMode('complete'); setPhase('saving');
+    runSave();
+  }, [runSave]);
+  const completeOnceRef = useRef(completeOnce); completeOnceRef.current = completeOnce;
+  const endCut = useCallback((silent = false) => {
+    const ct = cutRef.current; if (!ct) return;
+    cutRef.current = null; setCut(null);
+    sceneRef.current?.endMissionCutscene();
+    resetClockRef.current = true;
+    if (silent) return;
+    if (ct.replay) { setMenu('campaign'); showOverlay(); }
+    else { setPhase('done'); showOverlay(); }
+  }, []);
+  const endCutRef = useRef(endCut); endCutRef.current = endCut;
+  const replayScene = useCallback((id: number) => {
+    if (!sceneRef.current || cutRef.current || introActiveRef.current) return;
+    if (!campaignRef.current.completed.includes(id)) return;
+    resetClockRef.current = true;
+    cutRef.current = { id, t: 0, replay: true }; setCut({ id, t: 0, replay: true });
+  }, []);
+  const replayOwnScene = useCallback(() => {
+    const c = completionRef.current; if (!c || cutRef.current) return;
+    resetClockRef.current = true;
+    cutRef.current = { id: c.id, t: 0, replay: false }; setCut({ id: c.id, t: 0, replay: false });
+    setPhase('cutscene');
+  }, []);
+  const skipCut = useCallback(() => endCutRef.current(), []);
 
   const pause = useCallback(() => {
     if (simRef.current.mode !== 'run') return;
@@ -232,9 +381,12 @@ export default function Game() {
     simRef.current.mode = 'run';
     setMode('run');
   }, []);
-  const home = useCallback(() => {
-    simRef.current = newSim('home');
-    setResult(null);
+  const home = useCallback((to: 'home' | 'campaign' = 'home') => {
+    endCutRef.current(true);
+    simRef.current = freshSim('home');
+    completionRef.current = null; setCompletion(null); setPhase('none');
+    setResult(null); setToast(null);
+    setMenu(to);
     setMode('home');
     showOverlay();
   }, [showOverlay]);
@@ -248,46 +400,98 @@ export default function Game() {
     return () => sub.remove();
   }, [pause]);
 
-  const keyRef = useRef({ doAction, pause, resume, start, skip });
-  keyRef.current = { doAction, pause, resume, start, skip };
+  const keyRef = useRef({ doAction, pause, resume, start, skip, retry: startRun });
+  keyRef.current = { doAction, pause, resume, start, skip, retry: startRun };
+  const menuRef = useRef(menu); menuRef.current = menu;
+  // Android back: skip scenes, step back through menus, pause a run; never resumes a paused run
+  useEffect(() => {
+    if (Platform.OS !== 'android') return;
+    const sub = BackHandler.addEventListener('hardwareBackPress', () => {
+      if (cutRef.current) { endCutRef.current(); return true; }
+      if (introActiveRef.current) { keyRef.current.skip(); return true; }
+      if (vaultRef.current) { setVault(false); return true; }
+      const m = simRef.current.mode;
+      if (m === 'run') { keyRef.current.pause(); return true; }
+      if (m === 'paused' || m === 'complete' || m === 'dying') return true;
+      if (m === 'home' && menuRef.current === 'campaign') { setMenu('chooser'); return true; }
+      if (m === 'home' && menuRef.current === 'chooser') { setMenu('home'); return true; }
+      return false;
+    });
+    return () => sub.remove();
+  }, []);
   useEffect(() => {
     if (!isWeb || typeof window === 'undefined') return;
     const onKey = (e: KeyboardEvent) => {
       const k = keyRef.current;
       const m = simRef.current.mode;
+      if (vaultRef.current) { if (e.key === 'Escape') { e.preventDefault(); setVault(false); } return; }
+      if (cutRef.current) { if (e.key === 'Escape' || e.key === 'Enter') { e.preventDefault(); endCutRef.current(); } return; }
       if (introActiveRef.current) { if (e.key === 'Escape') { e.preventDefault(); k.skip(); } return; }
+      if (m === 'complete') return;
       const map: Record<string, Act> = { ArrowLeft: 'left', a: 'left', ArrowRight: 'right', d: 'right', ArrowUp: 'jump', w: 'jump', ' ': 'jump', ArrowDown: 'slide', s: 'slide' };
       if (map[e.key] && m === 'run') { e.preventDefault(); k.doAction(map[e.key]); return; }
-      if (e.key === 'Escape' || e.key === 'p') { if (m === 'run') k.pause(); else if (m === 'paused') k.resume(); }
-      if (e.key === 'Enter' && (m === 'home' || m === 'over')) k.start();
+      // Escape pauses but never resumes; P toggles
+      if (e.key === 'Escape' && m === 'run') k.pause();
+      if (e.key === 'p') { if (m === 'run') k.pause(); else if (m === 'paused') k.resume(); }
+      if (e.key === 'Enter' && m === 'home' && menuRef.current === 'home') k.start();
+      if (e.key === 'Enter' && m === 'over') k.retry();
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
   }, [isWeb]);
 
   // swipe: vertical = jump/slide; horizontal = corner turn (any mode) or touch-mode lateral nudge
+  // touch mode: horizontal drag steers continuously (finger position maps to lateral offset) unless a corner is
+  // being warned, in which case a horizontal swipe is a corner turn. Vertical swipes always jump/slide.
   const fired = useRef(false);
+  const dragRef = useRef<{ on: boolean; lane0: number }>({ on: false, lane0: 0 });
   const actRef = useRef(doAction); actRef.current = doAction;
+  const widthRef = useRef(width); widthRef.current = width;
   const pan = useRef(PanResponder.create({
     onStartShouldSetPanResponder: () => true,
     onMoveShouldSetPanResponder: () => true,
-    onPanResponderGrant: () => { fired.current = false; },
+    onPanResponderGrant: () => { fired.current = false; dragRef.current = { on: false, lane0: simRef.current.lane }; },
     onPanResponderMove: (_e, g) => {
+      const s = simRef.current;
+      if (dragRef.current.on) { setLane(s, dragRef.current.lane0 + (g.dx / Math.max(200, widthRef.current * 0.42)) * 1.2); return; }
       if (fired.current) return;
       const ax = Math.abs(g.dx); const ay = Math.abs(g.dy);
       if (Math.max(ax, ay) < 22) return;
-      if (ax > ay) { fired.current = true; actRef.current(g.dx < 0 ? 'left' : 'right'); return; }
+      if (ax > ay) {
+        const turning = s.mode === 'run' && turnInfo(s).open;
+        if (lateralRef.current && !turning) { dragRef.current.on = true; setLane(s, dragRef.current.lane0 + (g.dx / Math.max(200, widthRef.current * 0.42)) * 1.2); return; }
+        fired.current = true; actRef.current(g.dx < 0 ? 'left' : 'right'); return;
+      }
       fired.current = true;
       actRef.current(g.dy < 0 ? 'jump' : 'slide');
     },
   })).current;
+
+  // trophy vault + unlock reveal
+  const [vault, setVault] = useState(false);
+  const vaultRef = useRef(false); vaultRef.current = vault;
+  const [revealQ, setRevealQ] = useState<string[]>([]);
+  const seenRef = useRef<Set<string> | null>(null);
+  const unlockedKey = progress.trophies.filter((t) => t.unlocked).map((t) => t.id).join('|');
+  useEffect(() => {
+    if (!progress.loaded) return;
+    const ids = unlockedKey ? unlockedKey.split('|') : [];
+    if (!seenRef.current) { seenRef.current = new Set(ids); return; }
+    if (mode === 'run' || mode === 'paused' || mode === 'dying' || introOn || cut || phase === 'saving' || phase === 'cutscene') return;
+    const fresh = ids.filter((id) => !seenRef.current!.has(id));
+    if (!fresh.length) return;
+    fresh.forEach((id) => seenRef.current!.add(id));
+    setRevealQ((q) => [...q, ...fresh]);
+  }, [progress.loaded, unlockedKey, mode, introOn, cut, phase]);
+  const revealItems = revealQ.map((id) => progress.trophies.find((t) => t.id === id)).filter((t): t is NonNullable<typeof t> => !!t);
 
   const running = mode === 'run';
   const glow = pulse.interpolate({ inputRange: [0, 1], outputRange: [1, 1.04] });
   const danger = pulse.interpolate({ inputRange: [0, 1], outputRange: [0.45, 1] });
 
   const controlPanel = (
-    <ControlPanel ctl={ctl} isWeb={isWeb} status={tilt.status} message={tilt.message} onCalibrate={() => { tilt.calibrate().catch(() => {}); }} onCtl={setCtl} />
+    <ControlPanel ctl={ctl} isWeb={isWeb} status={tilt.status} message={tilt.message} onCalibrate={() => { tilt.calibrate().catch(() => {}); }} onCtl={setCtl}
+      sensitivity={progress.settings.sensitivity} onSensitivity={(v) => progress.updateSettings({ sensitivity: v })} />
   );
 
   return (
@@ -315,18 +519,20 @@ export default function Game() {
               </Pressable>
             </View>
           </View>
+          <HordeMeter horde={hud.horde} pulse={danger} />
+          <PowerChips shield={hud.shield} flashlight={hud.flashlight} distraction={hud.distraction} />
           <View style={styles.tiltTag} pointerEvents="none">
-            <Animated.View style={[styles.hordeDot, { opacity: danger }]} />
             <Text style={styles.tiltTagText}>{usingTilt ? (tilt.status === 'ready' ? 'TILT STEERING' : 'TILT ' + tilt.status.toUpperCase()) : 'TOUCH STEERING'}</Text>
           </View>
-          <StageChip hud={hud} />
+          {hud.mission ? <MissionHud h={hud.mission} /> : <StageChip hud={hud} />}
           {hud.turn && <TurnBanner turn={hud.turn} pulse={danger} />}
+          {toast && <Toast text={toast.text} tone={toast.tone} icon={toast.icon} />}
           <View style={{ flex: 1 }} pointerEvents="none" />
           {hud.turn && (
             <View style={styles.turnRow} pointerEvents="box-none">
               {([-1, 1] as const).map((dir) => (
                 <Pressable key={dir} testID={`turn-${dir < 0 ? 'left' : 'right'}`} accessibilityLabel={dir < 0 ? 'Turn left at the corner' : 'Turn right at the corner'} onPressIn={() => turnPress(dir)}
-                  style={({ pressed }) => [styles.turnBtn, hud.turn?.dir === dir && styles.turnBtnHint, hud.turn?.armed === dir && styles.turnBtnArmed, pressed && styles.padBtnOn]}>
+                  style={({ pressed }) => [styles.turnBtn, (hud.turn?.dir === dir || hud.turn?.branch) && styles.turnBtnHint, hud.turn?.armed === dir && styles.turnBtnArmed, pressed && styles.padBtnOn]}>
                   <Feather name={dir < 0 ? 'corner-up-left' : 'corner-up-right'} size={26} color={hud.turn?.armed === dir ? T.primaryForeground : T.foreground} />
                   <Text style={[styles.turnBtnText, hud.turn?.armed === dir && { color: T.primaryForeground }]}>{dir < 0 ? 'LEFT' : 'RIGHT'}</Text>
                 </Pressable>
@@ -338,7 +544,7 @@ export default function Game() {
               ? ([['left', 'chevron-left', 'Move left'], ['slide', 'chevrons-down', 'Slide'], ['jump', 'chevrons-up', 'Jump'], ['right', 'chevron-right', 'Move right']] as const)
               : ([['slide', 'chevrons-down', 'Slide'], ['jump', 'chevrons-up', 'Jump']] as const)
             ).map(([a, ic, label]) => (
-              <Pressable key={a} testID={`pad-${a}`} accessibilityLabel={label} onPressIn={() => doAction(a)} style={({ pressed }) => [styles.padBtn, pressed && styles.padBtnOn]}>
+              <Pressable key={a} testID={`pad-${a}`} accessibilityLabel={label} onPressIn={() => (a === 'left' || a === 'right' ? holdStart(a === 'left' ? -1 : 1) : doAction(a))} onPressOut={holdStop} style={({ pressed }) => [styles.padBtn, pressed && styles.padBtnOn]}>
                 <Feather name={ic} size={26} color={T.foreground} />
               </Pressable>
             ))}
@@ -346,7 +552,7 @@ export default function Game() {
         </View>
       )}
 
-      {mode === 'home' && !introOn && (
+      {mode === 'home' && !introOn && menu === 'home' && !cut && (
         <Animated.View style={[StyleSheet.absoluteFill, styles.overlayHome, { paddingTop: top + 12, paddingBottom: bottom + 16, opacity: fade }]}>
           <ScrollView contentContainerStyle={{ flexGrow: 1 }} showsVerticalScrollIndicator={false}>
             <View style={styles.brand}>
@@ -364,27 +570,26 @@ export default function Game() {
                 <Text style={styles.errorText}>{progress.error}</Text>
               </Pressable>
             )}
-            <View style={styles.statsRow}>
-              <Stat label="BEST RUN" value={progress.loaded ? `${progress.best} m` : '—'} />
-              <View style={styles.statDivider} />
-              <Stat label="SUPPLIES" value={progress.loaded ? `${progress.totalCoins}` : '—'} />
-              <View style={styles.statDivider} />
-              <Stat label="ESCAPES" value={progress.loaded ? `${progress.runs}` : '—'} />
+            <View style={styles.bestRow} testID="best-run" accessible accessibilityLabel={progress.loaded ? `Best run ${progress.best} metres` : 'Loading best run'}>
+              <Text style={styles.statLabel}>BEST RUN</Text>
+              <Text style={styles.bestValue}>{progress.loaded ? progress.best : '—'}<Text style={styles.hudUnit}> m</Text></Text>
             </View>
-            {controlPanel}
-            <SoundPanel prefs={audio.prefs} error={audio.error} onMusic={audio.toggleMusic} onSfx={audio.toggleSfx} onDismiss={audio.dismissError} />
             <Animated.View style={{ transform: [{ scale: glow }], marginTop: 12 }}>
-              <Pressable testID="start" disabled={!sceneReady} onPress={start} style={({ pressed }) => [styles.cta, pressed && styles.pressed, !sceneReady && { opacity: 0.5 }]}>
-                <Text style={styles.ctaText}>{sceneReady ? 'RUN' : 'LOADING CITY'}</Text>
+              <Pressable testID="start" disabled={!sceneReady || !progress.loaded} onPress={start} style={({ pressed }) => [styles.cta, pressed && styles.pressed, (!sceneReady || !progress.loaded) && { opacity: 0.5 }]}>
+                <Text style={styles.ctaText}>{!progress.loaded ? 'LOADING RECORDS' : sceneReady ? 'RUN' : 'LOADING CITY'}</Text>
                 <Feather name="arrow-up-right" size={24} color={T.primaryForeground} />
               </Pressable>
             </Animated.View>
+            <Pressable testID="trophy-open" accessibilityLabel="Trophies" onPress={() => setVault(true)} style={({ pressed }) => [styles.ghost, pressed && styles.pressed]}>
+              <Feather name="archive" size={18} color={T.accent} />
+              <Text style={styles.ghostText}>Trophies</Text>
+            </Pressable>
             <Pressable testID="help" onPress={() => setHelp(true)} style={({ pressed }) => [styles.ghost, pressed && styles.pressed]}>
               <Feather name="book-open" size={18} color={T.accent} />
               <Text style={styles.ghostText}>Survival briefing</Text>
             </Pressable>
-            {introSeenRef.current && (
-              <Pressable testID="replay-intro" onPress={playIntro} disabled={!sceneReady} style={({ pressed }) => [styles.ghost, pressed && styles.pressed]}>
+            {(
+              <Pressable testID="replay-intro" onPress={() => playIntro(null)} disabled={!sceneReady} style={({ pressed }) => [styles.ghost, pressed && styles.pressed, !sceneReady && { opacity: 0.5 }]}>
                 <Feather name="film" size={18} color={T.accent} />
                 <Text style={styles.ghostText}>Replay the night it started</Text>
               </Pressable>
@@ -402,6 +607,7 @@ export default function Game() {
               <Text style={styles.kicker}>HOLD YOUR BREATH</Text>
               <Text style={styles.panelTitle}>Paused</Text>
               <Text style={styles.panelSub}>{hud.dist} m out  ·  {hud.coins} supplies</Text>
+              <Text style={styles.kicker}>CONTROLS AND SOUND</Text>
               {controlPanel}
               <SoundPanel prefs={audio.prefs} error={audio.error} onMusic={audio.toggleMusic} onSfx={audio.toggleSfx} onDismiss={audio.dismissError} />
               <Pressable testID="resume" onPress={resume} style={({ pressed }) => [styles.cta, pressed && styles.pressed]}>
@@ -412,8 +618,11 @@ export default function Game() {
                 <Pressable testID="restart" onPress={startRun} style={({ pressed }) => [styles.ghost, pressed && styles.pressed]}>
                   <Feather name="rotate-ccw" size={18} color={T.accent} /><Text style={styles.ghostText}>Restart</Text>
                 </Pressable>
-                <Pressable testID="pause-home" onPress={home} style={({ pressed }) => [styles.ghost, pressed && styles.pressed]}>
+                <Pressable testID="pause-home" onPress={() => home(activeMission ? 'campaign' : 'home')} style={({ pressed }) => [styles.ghost, pressed && styles.pressed]}>
                   <Feather name="home" size={18} color={T.accent} /><Text style={styles.ghostText}>Safehouse</Text>
+                </Pressable>
+                <Pressable testID="trophy-open" accessibilityLabel="Trophies" onPress={() => setVault(true)} style={({ pressed }) => [styles.ghost, pressed && styles.pressed]}>
+                  <Feather name="archive" size={18} color={T.accent} /><Text style={styles.ghostText}>Trophies</Text>
                 </Pressable>
               </View>
             </View>
@@ -433,10 +642,16 @@ export default function Game() {
               ) : (
                 <Text style={styles.panelSub}>Best {progress.best} m</Text>
               )}
-              <View style={styles.statsRow}>
-                <Stat label="SUPPLIES THIS RUN" value={`+${result.coins}`} />
+              <View style={styles.statsRow} testID="run-stats">
+                <Stat label="CORNERS" value={`${result.turns}`} />
                 <View style={styles.statDivider} />
-                <Stat label="STOCKPILE" value={`${progress.totalCoins}`} />
+                <Stat label="JUMPS" value={`${result.jumps}`} />
+                <View style={styles.statDivider} />
+                <Stat label="SLIDES" value={`${result.slides}`} />
+                <View style={styles.statDivider} />
+                <Stat label="PICKUPS" value={`${result.pickups}`} />
+                <View style={styles.statDivider} />
+                <Stat label="SUPPLIES" value={`${result.coins}`} />
               </View>
               {progress.error && (
                 <Pressable onPress={progress.dismissError} style={styles.errorBar}>
@@ -444,17 +659,48 @@ export default function Game() {
                   <Text style={styles.errorText}>{progress.error}</Text>
                 </Pressable>
               )}
-              <Pressable testID="retry" onPress={startRun} style={({ pressed }) => [styles.cta, pressed && styles.pressed]}>
+              <Pressable testID={activeMission ? 'mission-retry' : 'retry'} onPress={startRun} style={({ pressed }) => [styles.cta, pressed && styles.pressed]}>
                 <Feather name="rotate-ccw" size={22} color={T.primaryForeground} />
                 <Text style={styles.ctaText}>RUN AGAIN</Text>
               </Pressable>
-              <Pressable testID="over-home" onPress={home} style={({ pressed }) => [styles.ghost, pressed && styles.pressed]}>
+              {activeMission && (
+                <Pressable testID="campaign-back" onPress={() => home('campaign')} style={({ pressed }) => [styles.ghost, pressed && styles.pressed]}>
+                  <Feather name="map" size={18} color={T.accent} /><Text style={styles.ghostText}>Escape route</Text>
+                </Pressable>
+              )}
+              <Pressable testID="over-home" onPress={() => home()} style={({ pressed }) => [styles.ghost, pressed && styles.pressed]}>
                 <Feather name="home" size={18} color={T.accent} /><Text style={styles.ghostText}>Back to the safehouse</Text>
+              </Pressable>
+              <Pressable testID="trophy-open" accessibilityLabel="Trophies" onPress={() => setVault(true)} style={({ pressed }) => [styles.ghost, pressed && styles.pressed]}>
+                <Feather name="archive" size={18} color={T.accent} /><Text style={styles.ghostText}>Trophies</Text>
               </Pressable>
             </View>
           </ScrollView>
         </Animated.View>
       )}
+
+      {mode === 'home' && !introOn && !cut && menu === 'chooser' && (
+        <ModeChooser top={top} bottom={bottom} best={progress.best} done={progress.campaign.completed.length}
+          onBack={() => setMenu('home')} onEndless={startEndless} onEscape={() => setMenu('campaign')} />
+      )}
+      {mode === 'home' && !introOn && !cut && menu === 'campaign' && (
+        <CampaignMap top={top} bottom={bottom} campaign={progress.campaign} loaded={progress.loaded && sceneReady}
+          onBack={() => setMenu('chooser')} onStart={startMission} onReplay={replayScene} />
+      )}
+      {mode === 'complete' && completion && phase === 'saving' && <MissionSaving top={top} bottom={bottom} title={missionById(completion.id).destination} />}
+      {mode === 'complete' && completion && phase === 'error' && (
+        <MissionSaveError top={top} bottom={bottom} busy={saveBusy} message={progress.error ?? 'Your device refused the write. Nothing was lost yet; try again.'}
+          onRetry={runSave} onAbandon={() => home('campaign')} />
+      )}
+      {mode === 'complete' && completion && phase === 'done' && !cut && (
+        <Animated.View style={[StyleSheet.absoluteFill, { opacity: fade }]}>
+          <MissionSuccess top={top} bottom={bottom} m={missionById(completion.id)} seconds={completion.seconds} coins={completion.coins}
+            best={progress.campaign.bestTimes[completion.id]} hasNext={completion.id < 10 && missionUnlocked(progress.campaign, completion.id + 1)}
+            onNext={() => startMission(completion.id + 1)} onRetry={() => { missionRef.current = completion.id; startRun(); }}
+            onCampaign={() => home('campaign')} onScene={replayOwnScene} />
+        </Animated.View>
+      )}
+      {cut && <CutsceneOverlay id={cut.id} t={cut.t} top={top} bottom={bottom} replay={cut.replay} onSkip={skipCut} />}
 
       {help && (
         <View style={[StyleSheet.absoluteFill, styles.scrim, { paddingTop: top, paddingBottom: bottom }]}>
@@ -470,7 +716,13 @@ export default function Game() {
               <HelpRow icon="map" title="Three zones, then repeat" body="Every 900 m the route changes: ruined city streets, then the Precinct 9 police station, then St. Agnes Hospital, then back outside. Uniformed officers patrol the precinct; doctors and nurses roam the wards. Your distance and speed carry through." />
               <HelpRow icon="arrow-up" title="Swipe up or tap Jump" body="Clear sinkholes and concrete barricades." />
               <HelpRow icon="arrow-down" title="Swipe down or tap Slide" body="Duck under quarantine gates. Mid-air, it drops you fast." />
+              <HelpRow icon="shield" title="Shield" body={POWER.shield.body} />
+              <HelpRow icon="sun" title="Torch" body={POWER.flashlight.body} />
+              <HelpRow icon="zap" title="Flare" body={POWER.distraction.body} />
+              <HelpRow icon="alert-triangle" title="Stumbles" body="Clip a barricade, gate or walker while the horde is well behind and you stumble instead of dying, then blink safe for a moment. Hit something while they are close and it is over. Sinkholes and wrong corners are always fatal." />
+              <HelpRow icon="git-branch" title="Routes and splits" body="The road changes every 300 m: evacuation boulevard, service passage, collapsed corridor. Split junctions open both ways; either turn is safe." />
               <HelpRow icon="package" title="Grab supplies" body="Glowing med canisters add to your stockpile. Arcs of them hint at a jump." />
+              <HelpRow icon="sliders" title="Controls and sound" body="Tilt or touch steering, calibration, sensitivity, music and effects all live in the pause menu. Tap the pause button at the top right during a run." />
               <HelpRow icon="command" title="No tilt?" body="Switch to Touch for lane buttons and sideways swipes (away from corners). On web: arrow keys or WASD, Space to jump, P to pause, Enter to start." />
               <Pressable testID="help-close" onPress={() => setHelp(false)} style={({ pressed }) => [styles.cta, pressed && styles.pressed]}>
                 <Feather name="check" size={22} color={T.primaryForeground} />
@@ -480,6 +732,13 @@ export default function Game() {
           </View>
         </View>
       )}
+
+      {vault && !running && !introOn && !cut && <TrophyMenu trophies={progress.trophies} top={top} bottom={bottom} onBack={() => setVault(false)} />}
+      {revealItems.length > 0 && !running && !introOn && !cut && phase !== 'saving' && phase !== 'error' && (
+        <TrophyReveal items={revealItems} top={top} bottom={bottom}
+          onNext={() => setRevealQ((q) => q.slice(1))}
+          onOpen={() => { setRevealQ([]); setVault(true); }} />
+      )}
     </View>
   );
 }
@@ -488,8 +747,8 @@ const STATUS_LABEL: Record<string, string> = {
   idle: 'Waking sensor', ready: 'Tilt ready', calibrating: 'Calibrating', unavailable: 'No motion sensor', denied: 'Motion access denied', error: 'Sensor error',
 };
 
-function ControlPanel({ ctl, isWeb, status, message, onCalibrate, onCtl }: {
-  ctl: Ctl; isWeb: boolean; status: string; message: string; onCalibrate: () => void; onCtl: (c: Ctl) => void;
+function ControlPanel({ ctl, isWeb, status, message, onCalibrate, onCtl, sensitivity, onSensitivity }: {
+  ctl: Ctl; isWeb: boolean; status: string; message: string; onCalibrate: () => void; onCtl: (c: Ctl) => void; sensitivity: number; onSensitivity: (v: number) => void;
 }) {
   const ok = status === 'ready';
   const bad = status === 'unavailable' || status === 'denied' || status === 'error';
@@ -519,9 +778,10 @@ function ControlPanel({ ctl, isWeb, status, message, onCalibrate, onCtl }: {
             <Text style={styles.calText}>{status === 'denied' ? 'Allow' : 'Calibrate'}</Text>
           </Pressable>
         </View>
-      ) : (
+      ) : null}
+      {ctl === 'tilt' && !isWeb ? <SensitivityRow value={sensitivity} onChange={onSensitivity} /> : (
         <Text style={styles.ctlBody}>
-          {isWeb ? 'Tilt steering needs the mobile app. Here: arrow keys or WASD, swipes, or the on-screen lane buttons.' : 'Lane buttons and sideways swipes steer. Swipe up or down to jump and slide.'}
+          {isWeb ? 'Tilt steering needs the mobile app. Here: arrow keys or WASD, swipes, or the on-screen lane buttons.' : 'Drag sideways anywhere to steer smoothly, or hold the lane buttons. Near a corner, a sideways swipe turns. Swipe up or down to jump and slide.'}
         </Text>
       )}
     </View>
@@ -565,6 +825,7 @@ function StageChip({ hud }: { hud: Hud }) {
           <Text style={[styles.stageName, fresh && { color: T.primaryForeground }]}>{fresh ? `ENTERING ${hud.stageName.toUpperCase()}` : hud.stageName.toUpperCase()}</Text>
           <View style={styles.stageTrack}><View style={[styles.stageFill, { width: `${Math.round(hud.stageProg * 100)}%` }]} /></View>
           <Text style={[styles.stageSub, fresh && { color: T.primaryForeground }]}>{hud.toNext} m to {STAGE_NAMES[hud.next]}</Text>
+          <Text style={[styles.stageSub, { color: fresh ? T.primaryForeground : T.primary }]} testID="route-name">{hud.route.toUpperCase()}</Text>
         </View>
       </View>
     </View>
@@ -603,15 +864,16 @@ function IntroOverlay({ t, top, bottom, onSkip, muted, audioError, onMute }: { t
 
 function TurnBanner({ turn, pulse }: { turn: HudTurn; pulse: Animated.AnimatedInterpolation<number> }) {
   const left = turn.dir < 0;
-  const armedOk = turn.armed === turn.dir;
-  const label = armedOk ? 'TURN LOCKED' : turn.open ? 'TURN NOW' : `${left ? 'LEFT' : 'RIGHT'} TURN`;
+  const armedOk = turn.branch ? turn.armed !== 0 : turn.armed === turn.dir;
+  const label = armedOk ? 'TURN LOCKED' : turn.branch ? (turn.open ? 'SPLIT · TURN NOW' : 'SPLIT AHEAD') : turn.open ? 'TURN NOW' : `${left ? 'LEFT' : 'RIGHT'} TURN`;
   return (
     <View style={styles.turnWrap} pointerEvents="none" testID="turn-banner">
       <Animated.View style={[styles.turnCard, turn.open && !armedOk && styles.turnCardOpen, armedOk && styles.turnCardArmed, turn.open && !armedOk ? { opacity: pulse } : null]}>
-        <Feather name={left ? 'corner-up-left' : 'corner-up-right'} size={30} color={armedOk || turn.open ? T.primaryForeground : T.primary} />
+        {turn.branch ? <Feather name="git-branch" size={28} color={armedOk || turn.open ? T.primaryForeground : T.primary} style={{ transform: [{ rotate: '180deg' }] }} />
+          : <Feather name={left ? 'corner-up-left' : 'corner-up-right'} size={30} color={armedOk || turn.open ? T.primaryForeground : T.primary} />}
         <View>
           <Text style={[styles.turnLabel, (armedOk || turn.open) && { color: T.primaryForeground }]}>{label}</Text>
-          <Text style={[styles.turnSub, (armedOk || turn.open) && { color: T.primaryForeground }]}>{armedOk ? 'Hold your line' : `${turn.dist} m · swipe ${left ? 'left' : 'right'}`}</Text>
+          <Text style={[styles.turnSub, (armedOk || turn.open) && { color: T.primaryForeground }]}>{armedOk ? 'Hold your line' : turn.branch ? `${turn.dist} m · swipe either way` : `${turn.dist} m · swipe ${left ? 'left' : 'right'}`}</Text>
         </View>
       </Animated.View>
     </View>
@@ -699,6 +961,8 @@ const styles = StyleSheet.create({
   stat: { flex: 1, alignItems: 'center' },
   statValue: { fontFamily: F.b, fontSize: 19, color: T.foreground, fontVariant: ['tabular-nums'] },
   statLabel: { fontFamily: F.s, fontSize: 9, letterSpacing: 1.8, color: T.mutedForeground, marginTop: 3 },
+  bestRow: { alignSelf: 'center', alignItems: 'center', paddingHorizontal: 28, paddingVertical: 10, marginBottom: 6, borderRadius: colors.radius, backgroundColor: T.glass, borderWidth: 1, borderColor: T.border },
+  bestValue: { fontFamily: F.b, fontSize: 34, color: T.foreground, letterSpacing: -1, fontVariant: ['tabular-nums'] },
   statDivider: { width: 1, height: 28, backgroundColor: T.border },
   ctlCard: { backgroundColor: T.glass, borderWidth: 1, borderColor: T.border, borderRadius: colors.radius, padding: 12, gap: 10 },
   seg: { flexDirection: 'row', backgroundColor: T.muted, borderRadius: 10, padding: 3 },

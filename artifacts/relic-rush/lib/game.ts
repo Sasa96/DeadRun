@@ -1,9 +1,10 @@
 // Relic Rush: Dead Run — pure simulation. No React, no rendering.
+import { missionById, missionSection, newCampaignRun, type CampaignRun } from './campaign.ts';
 export type ObstacleType = 'gap' | 'hurdle' | 'beam';
 export interface Obstacle { id: number; s: number; lane: number; type: ObstacleType }
 export interface Coin { id: number; s: number; lane: number; h: number; taken: boolean }
 export interface Pop { id: number; lane: number; h: number; age: number }
-export type Mode = 'home' | 'run' | 'paused' | 'dying' | 'over';
+export type Mode = 'home' | 'run' | 'paused' | 'dying' | 'over' | 'complete';
 export type TurnDir = -1 | 1;
 export type DeathCause = ObstacleType | 'corner' | 'wrongway' | 'walker';
 /** Themed stages cycle by path distance: city -> police -> hospital -> city ... */
@@ -44,9 +45,17 @@ export function obstaclePoolIndex(s: number, id: number, type: ObstacleType): nu
   return type === 'gap' ? b : type === 'beam' ? b + 3 : b + 1 + (id & 1);
 }
 /** A 90-degree corner at path distance `s`. dir -1 = left, 1 = right. */
-export interface Junction { id: number; s: number; dir: TurnDir }
+export interface Junction { id: number; s: number; dir: TurnDir; branch?: boolean }
+export type OutfitId = 'scout' | 'medic' | 'ranger';
+export type PickupType = 'shield' | 'flashlight' | 'distraction';
+export interface Pickup { id: number; s: number; lane: number; type: PickupType; taken: boolean }
+export function routeInfo(dist: number): { id: 'boulevard' | 'alley' | 'collapsed'; name: string; branch: boolean } {
+  const i = Math.floor(Math.max(0, dist) / 300) % 3;
+  return { id: (['boulevard', 'alley', 'collapsed'] as const)[i], name: ['Evacuation boulevard', 'Service passage', 'Collapsed corridor'][i], branch: i === 2 };
+}
 
 export interface Sim {
+  campaign: CampaignRun | null;
   mode: Mode;
   dist: number;
   speed: number;
@@ -83,6 +92,18 @@ export interface Sim {
   turnDirs: number[];
   /** metres between the survivor and the lead infected */
   horde: number;
+  pickups: Pickup[];
+  shieldT: number;
+  flashlightT: number;
+  distractionT: number;
+  stumbleT: number;
+  invulnerableT: number;
+  cleanTime: number;
+  pickupsRun: number;
+  jumps: number;
+  slides: number;
+  nearMisses: number;
+  outfit: OutfitId;
 }
 
 export const GAP_LEN = 2.6;
@@ -91,7 +112,7 @@ const JUMP_V = 10.4;
 const SLIDE_TIME = 0.7;
 export const START_SPEED = 11;
 export const MAX_SPEED = 30;
-export const HORDE_REST = 3.1;
+export const HORDE_REST = 5.5;
 const MAX_SUBSTEP = 1 / 120;
 /** rows are generated up to this far ahead and culled this far behind the runner */
 export const SPAWN_AHEAD = 75;
@@ -133,19 +154,36 @@ export function difficulty(dist: number): Difficulty {
   return {
     tier, name: TIER_NAMES[tier], level, speedCap: TIER_SPEED_CAP[tier], grace,
     density: grace ? 0 : level,
-    walkerChance: d < WALKER_START ? 0 : Math.min(0.42, 0.18 + tier * 0.04),
-    walkerVMax: Math.min(6.5, 4.0 + tier * 0.4),
+    walkerChance: d < WALKER_START ? 0 : 0.18 + level * 0.24,
+    walkerVMax: 4.0 + level * 2.5,
+  };
+}
+/** Campaign pressure depends on mission AND local progress, not a repeated short Endless run.
+ * Keep interaction/corner clear zones and a brief safe opening in every mission. */
+export function simDifficulty(s: Sim, at = s.dist): Difficulty {
+  if (!s.campaign) return difficulty(at);
+  const id = s.campaign.id;
+  // Use the authored length: missing an item must not reduce pressure by extending the goal.
+  const progress = Math.max(0, Math.min(1, at / missionById(id).finish));
+  const level = Math.min(1, (id - 1) * 0.075 + progress * 0.30);
+  const tier = Math.min(MAX_TIER, Math.floor(level * MAX_TIER));
+  return {
+    tier, name: TIER_NAMES[tier], level,
+    speedCap: Math.min(MAX_SPEED, 17.5 + (id - 1) * 1.25 + progress * 2),
+    density: at < 90 ? 0 : level, grace: at < 90,
+    walkerChance: at < WALKER_START ? 0 : 0.14 + level * 0.28,
+    walkerVMax: 3.5 + level * 3,
   };
 }
 /** ramp speed toward the tier cap; never exceeds it */
-export function nextSpeed(speed: number, dist: number, dt: number) {
-  const cap = difficulty(dist).speedCap;
+export function nextSpeed(speed: number, dist: number, dt: number, cap = difficulty(dist).speedCap) {
   if (speed >= cap) return Math.min(speed, MAX_SPEED);
   return Math.min(cap, speed + dt * 0.35);
 }
 /** distance between obstacle rows: tightens with density but never below MIN_ROW_TIME seconds of travel */
 export function rowSpacing(speed: number, density: number, r = 0.5) {
-  const base = 16 + speed * 0.5 + r * 8 - density * 6;
+  // Scale by travel time: the old high-speed floor erased most density increases.
+  const base = speed * (1.95 - Math.max(0, Math.min(1, density)) * 0.7 + r * 0.25);
   return Math.max(base, speed * MIN_ROW_TIME + 4);
 }
 /** speed-scaled corner clear corridor and warning */
@@ -158,7 +196,7 @@ function makeJunction(s: Sim, at: number): Junction {
   if (h.length === 1) dir = (-h[0]) as TurnDir; // first two corners always differ
   else if (h.length >= 2 && h[h.length - 1] === h[h.length - 2] && h[h.length - 1] === dir) dir = (-dir) as TurnDir; // never 3 in a row
   h.push(dir); if (h.length > 2) h.shift();
-  return { id: s.uid++, s: at, dir };
+  return { id: s.uid++, s: at, dir, branch: (s.turnsTaken + 1) % 3 === 0 };
 }
 
 function executeTurn(s: Sim) {
@@ -167,7 +205,13 @@ function executeTurn(s: Sim) {
   s.turnsTaken += 1;
   s.turnFx = 0;
   s.turnReq = 0;
-  s.turn = makeJunction(s, j.s + rand(TURN_GAP_MIN, TURN_GAP_MAX));
+  if (s.campaign) {
+    if (s.campaign.id === 4 && s.turnsTaken === 1) {
+      s.campaign.routeChoice = j.dir;
+      if (j.dir === -1) s.campaign.finish += 160;
+    }
+    s.turn = campaignJunction(s, s.turnsTaken);
+  } else s.turn = makeJunction(s, j.s + rand(TURN_GAP_MIN, TURN_GAP_MAX));
 }
 
 export interface TurnInfo { dir: TurnDir; dist: number; window: number; warn: boolean; open: boolean; armed: -1 | 0 | 1 }
@@ -199,12 +243,35 @@ export function newSim(mode: Mode = 'home'): Sim {
   s.turn = makeJunction(s, mode === 'home' ? FIRST_TURN_HOME : FIRST_TURN_RUN);
   return s;
 }
+export function newMissionSim(id: number): Sim {
+  const s = baseSim('run');
+  s.campaign = newCampaignRun(id);
+  s.speed = START_SPEED + (id - 1) * 0.85;
+  s.turn = campaignJunction(s, 0);
+  return s;
+}
+function campaignJunction(s: Sim, index: number): Junction {
+  const m = missionById(s.campaign!.id);
+  const at = 240 + index * 300;
+  return { id: s.uid++, s: at < s.campaign!.finish - 90 ? at : Infinity, dir: m.turns[index % m.turns.length],
+    branch: m.id === 4 && index === 0 };
+}
+export function simStageAt(s: Sim, dist: number): StageId {
+  return s.campaign ? missionSection(s.campaign, dist).stage : stageAt(dist);
+}
+export function simObstaclePoolIndex(s: Sim, dist: number, id: number, type: ObstacleType) {
+  const stage = simStageAt(s, dist);
+  return obstaclePoolIndex(stage === 'city' ? 0 : stage === 'police' ? STAGE_LEN : STAGE_LEN * 2, id, type);
+}
 
 function baseSim(mode: Mode): Sim {
   return {
+    campaign: null,
     mode, dist: 0, speed: START_SPEED, lane: 0, px: 0, jy: 0, vy: 0, slideT: 0, phase: 0,
     obstacles: [], coins: [], pops: [], nextS: 34, coinsRun: 0, time: 0, shake: 0, flash: 0,
     dieT: 0, deathCause: null, deathKind: null, walkers: [], uid: 2, horde: HORDE_REST,
+    pickups: [], shieldT: 0, flashlightT: 0, distractionT: 0, stumbleT: 0, invulnerableT: 0,
+    cleanTime: 0, pickupsRun: 0, jumps: 0, slides: 0, nearMisses: 0, outfit: 'scout',
     turn: { id: 1, s: 0, dir: 1 }, lastTurn: null, turnReq: 0, turnFx: 99, turnsTaken: 0, turnDirs: [],
   } as Sim;
 }
@@ -220,10 +287,12 @@ export function setLane(s: Sim, lane: number) {
 export const actions = {
   left(s: Sim) { if (s.lane > -1.2) { s.lane = Math.max(-1.2, s.lane - 0.35); return true; } return false; },
   right(s: Sim) { if (s.lane < 1.2) { s.lane = Math.min(1.2, s.lane + 0.35); return true; } return false; },
-  jump(s: Sim) { if (s.jy <= 0.001) { s.vy = JUMP_V; s.jy = 0.01; s.slideT = 0; return true; } return false; },
+  jump(s: Sim) { if (s.mode === 'run' && s.jy <= 0.001) { s.vy = JUMP_V; s.jy = 0.01; s.slideT = 0; s.jumps++; return true; } return false; },
   slide(s: Sim) {
+    if (s.mode !== 'run' || s.slideT > 0) return false;
     if (s.jy > 0.01) s.vy = -22;
     s.slideT = SLIDE_TIME;
+    s.slides++;
     return true;
   },
 };
@@ -232,16 +301,17 @@ function rand(a: number, b: number) { return a + Math.random() * (b - a); }
 
 /** Walker row: walkers start ahead so they meet the runner near `at`; at least one lane stays free and no obstacle shares the row. */
 function spawnWalkers(s: Sim, at: number) {
-  const kinds = STAGE_KINDS[stageAt(at)];
+  const kinds = STAGE_KINDS[simStageAt(s, at)];
   if (s.walkers.length >= WALKER_MAX) return false;
-  const count = Math.random() < 0.7 ? 1 : 2;
+  const df = simDifficulty(s, at);
+  const count = Math.random() < 0.12 + df.density * 0.45 ? 2 : 1;
   const lanes = [-1, 0, 1].sort(() => Math.random() - 0.5).slice(0, Math.min(count, WALKER_MAX - s.walkers.length));
   const J = s.turn.s;
   const made: Walker[] = [];
   for (const lane of lanes) {
     const avail = kinds.filter((k) => s.walkers.filter((w) => w.kind === k).length + made.filter((w) => w.kind === k).length < WALKER_PER_KIND);
     if (!avail.length) break;
-    const v = rand(2.5, difficulty(at).walkerVMax);
+    const v = rand(2.5, df.walkerVMax);
     const s0 = at + v * Math.max(0, at - s.dist) / Math.max(1, s.speed);
     // the whole walk (spawn -> meet) must stay out of the corner corridor
     if (at < J && s0 + 2 > J - clearBefore(s.speed)) return false;
@@ -256,10 +326,22 @@ function spawnWalkers(s: Sim, at: number) {
 
 function spawnRow(s: Sim) {
   const at = s.nextS;
+  const c = s.campaign;
+  if (c) {
+    const m = missionById(c.id);
+    // Scripted interactions have clear approaches; no random hazards can overlap them.
+    const protectedPoints = [!c.collected ? c.itemAt : -Infinity, m.activationAt ?? -Infinity];
+    const guard = protectedPoints.find((point) => Math.abs(at - point) < 55);
+    if (guard !== undefined) { s.nextS = guard + 58; return; }
+    if (at >= c.finish - 65) { s.nextS = c.finish + SPAWN_AHEAD + 100; return; }
+  }
   const J = s.turn.s;
   if (at + 6 > J - clearBefore(s.speed) && at - 8 < J + CLEAR_AFTER) { s.nextS = J + CLEAR_AFTER + 8; return; }
-  const df = difficulty(at); const diff = df.density;
-  if (at > WALKER_START && Math.random() < df.walkerChance && spawnWalkers(s, at)) {
+  const df = simDifficulty(s, at);
+  const diff = c?.id === 4 && c.routeChoice === -1 ? 0 : df.density;
+  // Keep moving infected away from interactions too, accounting for their spawn offset.
+  const walkerSafe = !c || ((!c.collected ? Math.abs(at - c.itemAt) > 120 : true) && Math.abs(at - (missionById(c.id).activationAt ?? -Infinity)) > 120 && at < c.finish - 120);
+  if (at > WALKER_START && walkerSafe && Math.random() < df.walkerChance && spawnWalkers(s, at)) {
     s.nextS = at + rowSpacing(s.speed, diff, Math.random());
     return;
   }
@@ -268,13 +350,18 @@ function spawnRow(s: Sim) {
   const blockedCount = df.grace ? 1 : r < 0.5 - diff * 0.3 ? 1 : r < 0.93 - diff * 0.13 ? 2 : 3;
   const lanes = [-1, 0, 1].sort(() => Math.random() - 0.5);
   const blocked = lanes.slice(0, blockedCount);
-  const types: ObstacleType[] = ['gap', 'hurdle', 'beam'];
-  const shared = types[Math.floor(Math.random() * 3)];
+  const types: ObstacleType[] = c?.id === 9 ? ['beam', 'gap', 'beam'] : at < 90 ? ['hurdle'] : at < 180 ? ['hurdle', 'beam'] : ['gap', 'hurdle', 'beam'];
+  const shared = types[Math.floor(Math.random() * types.length)];
   for (const lane of blocked) {
-    const type = blockedCount === 3 || Math.random() < 0.5 ? shared : types[Math.floor(Math.random() * 3)];
+    const type = blockedCount === 3 || Math.random() < 0.5 ? shared : types[Math.floor(Math.random() * types.length)];
     s.obstacles.push({ id: s.uid++, s: at, lane, type });
   }
   const free = lanes.slice(blockedCount);
+  // Supply appears before a hazard, in the safe corridor. Pools remain bounded.
+  if (at > 90 && free.length && s.pickups.length < 4 && Math.random() < 0.22 - diff * 0.10) {
+    const types: PickupType[] = ['shield', 'flashlight', 'distraction'];
+    s.pickups.push({ id: s.uid++, s: at - 8, lane: free[0], type: types[Math.floor(Math.random() * 3)], taken: false });
+  }
   if (free.length && Math.random() < 0.75) {
     const lane = free[0];
     for (let i = 0; i < 5; i++) s.coins.push({ id: s.uid++, s: at - 7 + i * 2.2, lane, h: 0.7, taken: false });
@@ -291,9 +378,9 @@ function spawnRow(s: Sim) {
 }
 
 /** Advance the sim by an arbitrary frame dt; internally clamped and sub-stepped to avoid tunnelling. */
-export function advance(s: Sim, frameDt: number): { coin: boolean; died: boolean; turned: boolean } {
-  const out = { coin: false, died: false, turned: false };
-  if (s.mode === 'paused' || s.mode === 'over') return out;
+export function advance(s: Sim, frameDt: number): { coin: boolean; died: boolean; turned: boolean; pickup: boolean; stumbled: boolean; completed: boolean; missionPickup: boolean } {
+  const out = { coin: false, died: false, turned: false, pickup: false, stumbled: false, completed: false, missionPickup: false };
+  if (s.mode === 'paused' || s.mode === 'over' || s.mode === 'complete') return out;
   let left = Math.min(0.1, Math.max(0, frameDt));
   while (left > 1e-6) {
     const dt = Math.min(MAX_SUBSTEP, left);
@@ -302,14 +389,19 @@ export function advance(s: Sim, frameDt: number): { coin: boolean; died: boolean
     if (ev.coin) out.coin = true;
     if (ev.died) out.died = true;
     if (ev.turned) out.turned = true;
+    if (ev.pickup) out.pickup = true;
+    if (ev.stumbled) out.stumbled = true;
+    if (ev.completed) out.completed = true;
+    if (ev.missionPickup) out.missionPickup = true;
     // step mutates mode; widen the entry-state narrowing after that call.
-    if ((s.mode as Mode) === 'over' || (s.mode as Mode) === 'paused') break;
+    if ((s.mode as Mode) === 'over' || (s.mode as Mode) === 'paused' || (s.mode as Mode) === 'complete') break;
   }
   return out;
 }
 
-export function step(s: Sim, dt: number): { coin: boolean; died: boolean; turned?: boolean } {
-  const out: { coin: boolean; died: boolean; turned?: boolean } = { coin: false, died: false };
+export function step(s: Sim, dt: number): { coin: boolean; died: boolean; turned?: boolean; pickup?: boolean; stumbled?: boolean; completed?: boolean; missionPickup?: boolean } {
+  const out: { coin: boolean; died: boolean; turned?: boolean; pickup?: boolean; stumbled?: boolean; completed?: boolean; missionPickup?: boolean } = { coin: false, died: false };
+  if (s.mode === 'complete' || s.mode === 'paused' || s.mode === 'over') return out;
   s.time += dt;
   for (const p of s.pops) p.age += dt;
   if (s.pops.length && s.pops[0].age >= 0.6) s.pops = s.pops.filter((p) => p.age < 0.6);
@@ -336,14 +428,24 @@ export function step(s: Sim, dt: number): { coin: boolean; died: boolean; turned
     return out;
   }
   if (s.mode !== 'run') return out;
+  if (s.campaign?.activationT) {
+    s.campaign.activationT = Math.max(0, s.campaign.activationT - dt);
+    if (s.campaign.activationT === 0) s.campaign.activated = true;
+    return out;
+  }
 
-  s.speed = nextSpeed(s.speed, s.dist, dt);
-  s.dist += s.speed * dt;
+  s.shieldT = Math.max(0, s.shieldT - dt);
+  s.flashlightT = Math.max(0, s.flashlightT - dt);
+  s.distractionT = Math.max(0, s.distractionT - dt);
+  s.stumbleT = Math.max(0, s.stumbleT - dt);
+  s.invulnerableT = Math.max(0, s.invulnerableT - dt);
+  s.cleanTime += dt;
+  s.speed = nextSpeed(s.speed, s.dist, dt, simDifficulty(s).speedCap);
+  s.dist += s.speed * dt * (s.stumbleT > 0 ? 0.65 : 1);
   s.phase += dt * (6 + s.speed * 0.45);
   s.px += (s.lane - s.px) * Math.min(1, dt * 14);
-  // horde breathes: closes in slightly when you slow down via slides, drifts back otherwise
-  const target = HORDE_REST - (s.slideT > 0 ? 0.5 : 0) + Math.sin(s.time * 1.3) * 0.25;
-  s.horde += (target - s.horde) * Math.min(1, dt * 1.5);
+  // Clean running earns space; repeated mistakes before recovery let the horde catch up.
+  if (s.stumbleT <= 0) s.horde = Math.min(HORDE_REST + (s.distractionT > 0 ? 3 : 0), s.horde + dt * (s.distractionT > 0 ? 1.8 : 0.12));
   if (s.jy > 0 || s.vy > 0) {
     s.vy -= GRAVITY * dt;
     s.jy += s.vy * dt;
@@ -351,11 +453,41 @@ export function step(s: Sim, dt: number): { coin: boolean; died: boolean; turned
   }
   s.slideT = Math.max(0, s.slideT - dt);
 
+  const c = s.campaign;
+  if (c) {
+    const m = missionById(c.id);
+    if (!c.collected && Math.abs(c.itemAt - s.dist) < 1.1 && Math.abs(s.px - c.itemLane) < 0.48) {
+      c.collected = true; out.missionPickup = true; s.flash = 0.2;
+    }
+    if (!c.collected && s.dist > c.itemAt + 4) {
+      c.recoveries++;
+      c.itemAt = s.dist + 110;
+      // Never place a recovery item at a corner.
+      if (Math.abs(c.itemAt - s.turn.s) < 65) c.itemAt = s.turn.s + 85;
+      c.finish = Math.max(c.finish + 110, c.itemAt + 160);
+      s.obstacles = s.obstacles.filter((o) => Math.abs(o.s - c.itemAt) > 60);
+      s.walkers = s.walkers.filter((w) => Math.abs(w.s - c.itemAt) > 120);
+    }
+    if (m.activationAt && c.collected && !c.activated && s.dist >= m.activationAt) {
+      c.activationT = 2.5;
+      s.obstacles = s.obstacles.filter((o) => Math.abs(o.s - s.dist) > 50);
+      s.walkers = s.walkers.filter((w) => Math.abs(w.s - s.dist) > 80);
+      return out;
+    }
+    if (s.dist >= c.finish && c.collected && (!m.activationAt || c.activated)) {
+      s.dist = c.finish; s.mode = 'complete'; out.completed = true;
+      return out;
+    }
+  }
+
   // corner resolution
   if (s.dist >= s.turn.s) {
     const j = s.turn;
     let cause: DeathCause | null = null;
-    if (s.turnReq === j.dir) { executeTurn(s); out.turned = true; }
+    if (s.turnReq === j.dir || (j.branch && s.turnReq !== 0)) {
+      if (j.branch) j.dir = s.turnReq as TurnDir;
+      executeTurn(s); out.turned = true;
+    }
     else if (s.turnReq === -j.dir) cause = 'wrongway';
     else if (s.dist >= j.s + TURN_LATE) cause = 'corner';
     if (cause) {
@@ -368,9 +500,20 @@ export function step(s: Sim, dt: number): { coin: boolean; died: boolean; turned
 
   while (s.nextS < s.dist + SPAWN_AHEAD) spawnRow(s);
 
+  for (const p of s.pickups) {
+    if (p.taken || Math.abs(p.s - s.dist) > 0.85 || Math.abs(p.lane - s.px) > 0.38) continue;
+    p.taken = true; s.pickupsRun++; out.pickup = true;
+    if (p.type === 'shield') s.shieldT = 12;
+    else if (p.type === 'flashlight') s.flashlightT = 12;
+    else { s.distractionT = 8; s.horde = Math.min(9, s.horde + 3); }
+  }
+  s.pickups = s.pickups.filter((p) => !p.taken && p.s > s.dist - 4);
+
   for (const w of s.walkers) {
     w.s -= w.v * dt;
     if (Math.abs(w.lane - s.px) > WALKER_HALF_W || Math.abs(w.s - s.dist) > WALKER_HALF_D) continue;
+    if (s.invulnerableT > 0) continue;
+    if (absorbHit(s)) { out.stumbled = true; continue; }
     s.mode = 'dying'; s.deathCause = 'walker'; s.deathKind = w.kind; s.shake = 0.6; s.flash = 1; s.dieT = 0;
     out.died = true;
     return out;
@@ -385,6 +528,8 @@ export function step(s: Sim, dt: number): { coin: boolean; died: boolean; turned
     if (o.type === 'gap') hit = z <= 0.25 && z + GAP_LEN >= 0.35 && s.jy < 0.25;
     else if (Math.abs(z) < 0.45) hit = o.type === 'hurdle' ? s.jy < 0.75 : s.slideT <= 0;
     if (hit) {
+      if (o.type !== 'gap' && s.invulnerableT > 0) continue;
+      if (o.type !== 'gap' && absorbHit(s)) { out.stumbled = true; continue; }
       s.mode = 'dying'; s.deathCause = o.type; s.shake = 0.5; s.flash = 1; s.dieT = 0;
       out.died = true;
       return out;
@@ -403,6 +548,17 @@ export function step(s: Sim, dt: number): { coin: boolean; died: boolean; turned
   return out;
 }
 
+/** A shield absorbs one impact; otherwise a recoverable stumble requires space from the horde. */
+function absorbHit(s: Sim) {
+  if (s.shieldT > 0) {
+    s.shieldT = 0; s.invulnerableT = 1.4; s.flash = 0.25;
+    return true;
+  }
+  if (s.horde < 3.5) return false;
+  s.horde = Math.max(1, s.horde - 3);
+  s.stumbleT = 0.85; s.invulnerableT = 1.4; s.cleanTime = 0; s.shake = 0.3;
+  return true;
+}
 /** Render pool capacity per obstacle model: every live obstacle must have a mesh.
  * live rows <= ceil((ahead + behind) / min row spacing) + 1; min spacing = START_SPEED*MIN_ROW_TIME + 4; <= 3 per row. */
 export const OB_POOL_CAP = Math.max(24, 3 * (Math.ceil((SPAWN_AHEAD + DESPAWN_BEHIND) / (START_SPEED * MIN_ROW_TIME + 4)) + 1));

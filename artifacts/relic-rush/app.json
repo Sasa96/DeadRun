@@ -11,7 +11,9 @@
       "supportsTablet": false,
       "bundleIdentifier": "com.fairsmith.deadrun",
       "infoPlist": {
-        "ITSAppUsesNonExemptEncryption": false
+        "ITSAppUsesNonExemptEncryption": false,
+        "LSApplicationCategoryType": "public.app-category.action-games",
+        "GCSupportsGameMode": true
       }
     },
     "android": {

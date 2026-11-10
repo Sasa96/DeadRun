@@ -141,25 +141,25 @@ function addHead(b: Builder, s: Spec) {
   for (const sx of [-1, 1]) {
     b.add(blob(0.03, 0.009, 0.013), { c: s.hair.c, noise: 0.05 }, M(sx * 0.036, 0.137, -0.098, 0, 0, sx * -0.12));
     b.add(blob(0.023, 0.017, 0.008), { c: s.sunken ? '#3B3540' : s.skin.c, ao: 0 }, M(sx * 0.035, 0.115, -0.094));
-    b.add(new THREE.SphereGeometry(0.012, 8, 6), { c: s.eyeWhite, noise: 0 }, M(sx * 0.035, 0.115, -0.098));
-    b.add(new THREE.SphereGeometry(0.0065, 6, 5), { c: s.iris, noise: 0 }, M(sx * 0.035, 0.115, -0.108));
+    b.add(new THREE.SphereGeometry(0.0135, 8, 6), { c: s.eyeWhite, noise: 0 }, M(sx * 0.035, 0.115, -0.097));
+    b.add(new THREE.SphereGeometry(0.0075, 6, 5), { c: s.iris, noise: 0 }, M(sx * 0.035, 0.115, -0.108));
     // ear
     b.add(blob(0.011, 0.027, 0.019), { ...skin, ao: 0.3 }, M(sx * 0.092, 0.1, 0.008, 0, sx * 0.3));
     // cheekbone
-    b.add(blob(0.028, 0.02, 0.025), skin, M(sx * 0.052, 0.085, -0.07));
+    b.add(blob(0.021, 0.014, 0.016), skin, M(sx * 0.05, 0.088, -0.076));
   }
   // lids, nostril wings, philtrum, split lips, chin pad, temples
   for (const sx of [-1, 1]) {
     b.add(blob(0.016, 0.006, 0.01), { ...skin, ao: 0 }, M(sx * 0.035, 0.126, -0.1, -0.3));
     b.add(blob(0.015, 0.004, 0.008), { c: s.sunken ? '#4A3E46' : skin.c, noise: 0.03 }, M(sx * 0.035, 0.104, -0.1));
     b.add(blob(0.011, 0.01, 0.012), { ...skin, ao: 0.2 }, M(sx * 0.013, 0.074, -0.108));
-    b.add(blob(0.012, 0.03, 0.02), skin, M(sx * 0.083, 0.13, -0.05));
+    b.add(blob(0.008, 0.022, 0.014), skin, M(sx * 0.08, 0.13, -0.05));
   }
   b.add(blob(0.007, 0.012, 0.006), { ...skin, ao: 0.25 }, M(0, 0.06, -0.104));
-  b.add(blob(0.026, 0.006, 0.011), { c: s.slack ? '#3A2A2E' : s.lip, noise: 0.02 }, M(0, 0.05, -0.098));
-  b.add(blob(0.024, s.slack ? 0.008 : 0.007, 0.011), { c: s.lip, noise: 0.03 }, M(0, 0.036 - (s.slack ? 0.012 : 0), -0.094));
+  b.add(blob(0.02, 0.005, 0.008), { c: s.slack ? '#3A2A2E' : s.lip, noise: 0.02 }, M(0, 0.05, -0.1));
+  b.add(blob(0.019, s.slack ? 0.008 : 0.006, 0.008), { c: s.lip, noise: 0.03 }, M(0, 0.039 - (s.slack ? 0.012 : 0), -0.097));
   if (s.slack) b.add(blob(0.022, 0.01, 0.006), { c: '#1A1216', noise: 0 }, M(0, 0.043 - 0.006, -0.094));
-  b.add(blob(0.022, 0.016, 0.014), skin, M(0, 0.008 - (s.slack ? 0.014 : 0), -0.088));
+  b.add(blob(0.017, 0.012, 0.01), skin, M(0, 0.012 - (s.slack ? 0.014 : 0), -0.087));
   if (s.sunken) {
     // infected: exposed teeth, torn cheek, one clouded bulging eye, bloody chin streak, bald scalp wound
     for (let i = 0; i < 5; i++) b.add(new THREE.BoxGeometry(0.007, 0.009, 0.004), { c: '#C8BE98', noise: 0.1 }, M(-0.014 + i * 0.007, 0.044 - (s.slack ? 0.008 : 0), -0.1));
@@ -173,8 +173,8 @@ function addHead(b: Builder, s: Spec) {
   const hairP = s.hair;
   switch (s.hairStyle) {
     case 'beanie': {
-      b.add(new THREE.SphereGeometry(0.115, 16, 8, 0, Math.PI * 2, 0, 1.5), { c: C.beanie, noise: 0.08, ao: 0.2 }, M(0, 0.118, 0.006, -0.12, 0, 0, 0.92, 1.12, 1.04));
-      b.add(ring(0.1, 0.017, 18), { c: C.beanie, noise: 0.1 }, M(0, 0.135, 0.004, Math.PI / 2 - 0.12, 0, 0, 0.94, 1.06, 1));
+      b.add(new THREE.SphereGeometry(0.115, 16, 8, 0, Math.PI * 2, 0, 1.45), { c: C.beanie, noise: 0.08, ao: 0.2 }, M(0, 0.135, 0.01, -0.2, 0, 0, 0.92, 1.1, 1.04));
+      b.add(ring(0.1, 0.017, 18), { c: C.beanie, noise: 0.1 }, M(0, 0.163, 0.012, Math.PI / 2 - 0.2, 0, 0, 0.94, 1.06, 1));
       b.add(blob(0.088, 0.05, 0.075), hairP, M(0, 0.085, 0.03));
       break;
     }

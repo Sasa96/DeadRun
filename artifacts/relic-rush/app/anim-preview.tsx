@@ -47,6 +47,7 @@ export default function AnimPreview() {
     const view = param('view', 'both');
     const side = new THREE.PerspectiveCamera(30, (view === 'both' ? W / 2 : W) / H, 0.1, 100);
     side.position.set(5.2, 1.1, 0); side.lookAt(0, 0.95, 0);
+    if (view === 'face') { side.fov = 22; side.updateProjectionMatrix(); side.position.set(0.9, 1.75, -1.6); side.lookAt(0, 1.58, 0); }
     const back = new THREE.PerspectiveCamera(30, (view === 'both' ? W / 2 : W) / H, 0.1, 100);
     // same framing as the in-game chase camera
     back.fov = 62; back.updateProjectionMatrix(); back.position.set(0, 4.3, 7.6); back.lookAt(0, 1.2, -9);
@@ -63,7 +64,7 @@ export default function AnimPreview() {
       if (mode === 'slide') { jumpT += dt; s.slideT = jumpT % 2 < 0.8 ? 0.5 : 0; }
       rig.root.position.y = Math.max(0, s.jy);
       animateSurvivor(rig, s);
-      if (view === 'side' || view === 'both') { renderer.setViewport(0, 0, view === 'both' ? W / 2 : W, H); renderer.setScissor(0, 0, view === 'both' ? W / 2 : W, H); renderer.render(scn, side); }
+      if (view === 'side' || view === 'both' || view === 'face') { renderer.setViewport(0, 0, view === 'both' ? W / 2 : W, H); renderer.setScissor(0, 0, view === 'both' ? W / 2 : W, H); renderer.render(scn, side); }
       if (view === 'back' || view === 'both') { const x0 = view === 'both' ? W / 2 : 0; renderer.setViewport(x0, 0, view === 'both' ? W / 2 : W, H); renderer.setScissor(x0, 0, view === 'both' ? W / 2 : W, H); renderer.render(scn, back); }
       gl.endFrameEXP();
       requestAnimationFrame(tick);

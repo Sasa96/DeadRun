@@ -103,7 +103,7 @@ test('tilt remains continuous and retry resets every new mechanic', () => {
 });
 
 // ---- difficulty progression ----
-import { difficulty, nextSpeed, rowSpacing, clearBefore, turnWarn, GRACE_DIST, MIN_ROW_TIME, MAX_SPEED, START_SPEED, MAX_TIER, TURN_WARN, CLEAR_BEFORE, CLEAR_AFTER, WALKER_START, CAMPAIGN_MAX_SPEED, MAX_DENSITY, OVERDRIVE_FROM, HORDE_REGEN, STUMBLE_PUSH } from '../lib/game.ts';
+import { difficulty, nextSpeed, rowSpacing, clearBefore, turnWarn, GRACE_DIST, MIN_ROW_TIME, MAX_SPEED, START_SPEED, MAX_TIER, TURN_WARN, CLEAR_BEFORE, CLEAR_AFTER, WALKER_START, CAMPAIGN_MAX_SPEED, MAX_DENSITY, OVERDRIVE_FROM, HORDE_REGEN, STUMBLE_PUSH, MISSION_MAX_SPEED } from '../lib/game.ts';
 
 function seeded(seed) { let x = seed >>> 0; return () => { x = (x * 1664525 + 1013904223) >>> 0; return x / 4294967296; }; }
 function withSeed(seed, fn) { const r = Math.random; Math.random = seeded(seed); try { return fn(); } finally { Math.random = r; } }
@@ -368,7 +368,7 @@ test('special infected unlock one per mission; Last Stand adds them by distance'
   assert.deepEqual(specialTypes(4), ['crawler', 'sprinter', 'brute']);
   assert.deepEqual(specialTypes(10), ['crawler', 'sprinter', 'brute']);
   assert.equal(specialChance(1), 0);
-  assert(specialChance(3) > specialChance(2) && specialChance(10) <= 0.6);
+  assert(specialChance(3) > specialChance(2) && specialChance(10) <= 0.7);
   assert.deepEqual(lastStandTypes(0), []);
   assert.deepEqual(lastStandTypes(799), []);
   assert.deepEqual(lastStandTypes(800), ['crawler']);
@@ -441,7 +441,7 @@ test('Last Stand keeps getting harder past 3 km until capped, top speed 40 m/s',
   // campaign never exceeds its own cap and has no overdrive
   for (let id = 1; id <= 10; id++) {
     const m = newMissionSim(id);
-    assert(simDifficultyOf(m, 5000).speedCap <= CAMPAIGN_MAX_SPEED);
+    assert(simDifficultyOf(m, 5000).speedCap <= MISSION_MAX_SPEED);
     assert.equal(simDifficultyOf(m, 5000).overdrive, 0);
   }
 });

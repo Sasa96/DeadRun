@@ -44,7 +44,7 @@ export function specialTypes(missionId: number | null | undefined): WalkerType[]
 }
 /** chance a walker row is a special infected, rising with the mission */
 export function specialChance(missionId: number | null | undefined) {
-  return !missionId || missionId < 2 ? 0 : Math.min(0.6, 0.3 + (missionId - 2) * 0.04);
+  return !missionId || missionId < 2 ? 0 : Math.min(0.7, 0.38 + (missionId - 2) * 0.05);
 }
 /** Last Stand (endless) brings them in by distance instead: crawlers, then sprinters, then brutes. */
 export const LAST_STAND_SPECIALS: [WalkerType, number][] = [['crawler', 800], ['sprinter', 1600], ['brute', 2500]];
@@ -146,6 +146,8 @@ export const START_SPEED = 11;
 export const MAX_SPEED = 40;
 /** campaign missions and the Last Stand tier ladder top out here */
 export const CAMPAIGN_MAX_SPEED = 30;
+/** campaign missions may run a little faster than the tier ladder; the last missions top out here */
+export const MISSION_MAX_SPEED = 33;
 export const HORDE_REST = 5.5;
 const MAX_SUBSTEP = 1 / 120;
 /** rows are generated up to this far ahead and culled this far behind the runner */
@@ -220,15 +222,21 @@ export function simDifficulty(s: Sim, at = s.dist): Difficulty {
   const id = s.campaign.id;
   // Use the authored length: missing an item must not reduce pressure by extending the goal.
   const progress = Math.max(0, Math.min(1, at / missionById(id).finish));
-  const level = Math.min(1, 0.05 + (id - 1) * 0.09 + progress * 0.15);
+  // ~one threat level higher than before throughout, with a steeper climb inside each mission;
+  // the last missions push past the top of the ladder (extra density, more and faster infected)
+  const raw = 0.12 + (id - 1) * 0.085 + progress * 0.2;
+  const level = Math.min(1, raw);
+  const extra = Math.min(MAX_DENSITY - 1, Math.max(0, raw - 1));
   const tier = Math.min(MAX_TIER, Math.floor(level * MAX_TIER));
   return {
     tier, name: TIER_NAMES[tier], level,
-    speedCap: Math.min(CAMPAIGN_MAX_SPEED, 18.5 + (id - 1) * 1.2 + progress * 2),
-    density: at < 90 ? 0 : level, grace: at < 90,
-    walkerChance: at < WALKER_START ? 0 : 0.16 + level * 0.34,
-    walkerVMax: 3.5 + level * 3.5,
-    overdrive: 0, hordeRegen: HORDE_REGEN, stumblePush: STUMBLE_PUSH,
+    speedCap: Math.min(MISSION_MAX_SPEED, 19 + (id - 1) * 1.35 + progress * 2.2),
+    density: at < 90 ? 0 : level + extra, grace: at < 90,
+    walkerChance: at < WALKER_START ? 0 : 0.18 + level * 0.36 + extra * 0.3,
+    walkerVMax: 3.8 + level * 3.7 + extra * 3,
+    overdrive: 0,
+    // later missions forgive less: the horde recovers slower and stumbles let it closer
+    hordeRegen: HORDE_REGEN / (1 + (id - 1) * 0.05), stumblePush: STUMBLE_PUSH + (id - 1) * 0.12,
   };
 }
 /** ramp speed toward the tier cap; never exceeds it */

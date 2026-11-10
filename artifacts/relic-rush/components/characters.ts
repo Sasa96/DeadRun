@@ -507,6 +507,27 @@ export function buildZombie(i: number, mat: THREE.Material) {
 // ---------- animation ----------
 const sm = (x: number) => x * x * (3 - 2 * x);
 
+// ---------- keyframed run cycle ----------
+/** Periodic Catmull-Rom through [fraction, value] keys over one stride (0..1). */
+function cyc(keys: readonly (readonly [number, number])[], f: number) {
+  const n = keys.length; const u = ((f % 1) + 1) % 1;
+  let i = n - 1; for (let k = 0; k < n; k++) if (keys[k][0] > u) { i = k - 1; break; }
+  const at = (j: number) => { const m = ((j % n) + n) % n; const wrap = Math.floor(j / n); return [keys[m][0] + wrap, keys[m][1]] as const; };
+  const [x0, p0] = at(i - 1); const [x1, p1] = at(i); const [x2, p2] = at(i + 1); const [x3, p3] = at(i + 2);
+  const uu = u < x1 ? u + 1 : u;
+  const t = (uu - x1) / Math.max(1e-6, x2 - x1);
+  const m1 = (p2 - p0) / Math.max(1e-6, x2 - x0) * (x2 - x1); const m2 = (p3 - p1) / Math.max(1e-6, x3 - x1) * (x2 - x1);
+  const t2 = t * t; const t3 = t2 * t;
+  return (2 * t3 - 3 * t2 + 1) * p1 + (t3 - 2 * t2 + t) * m1 + (-2 * t3 + 3 * t2) * p2 + (t3 - t2) * m2;
+}
+// One leg over a stride, 0 = foot strike. Stance (0-0.3) then flight (0.3-0.5) with both feet off the ground: thigh sweeps back under the body with a
+// slight knee give at mid-stance; toe-off; swing: heel kicks up toward the seat, knee drives forward
+// and high, then the shin reaches out and paws back into the next strike.
+const THIGH = [[0, 0.36], [0.1, 0.1], [0.2, -0.18], [0.3, -0.46], [0.42, -0.28], [0.55, 0.22], [0.7, 0.72], [0.84, 0.7], [0.94, 0.5]] as const;
+const KNEE = [[0, 0.3], [0.1, 0.58], [0.22, 0.36], [0.3, 0.42], [0.42, 1.5], [0.52, 2.05], [0.64, 1.75], [0.78, 1.15], [0.9, 0.6], [0.97, 0.34]] as const;
+/** per-rig memory for landing absorption (animators get no dt) */
+const runMem = new WeakMap<Rig, { air: boolean; land: number; t: number }>();
+
 export function animateSurvivor(r: Rig, s: Sim) {
   const p = s.phase; const sn = Math.sin(p); const cs = Math.cos(p);
   const sliding = s.slideT > 0 && s.jy < 0.05; const air = s.jy > 0.02;
@@ -515,6 +536,7 @@ export function animateSurvivor(r: Rig, s: Sim) {
   r.torso.rotation.set(0, 0, 0); r.hips.rotation.set(0, 0, 0); r.head.rotation.set(0, 0, 0);
   r.armL.rotation.set(0, 0, 0.06); r.armR.rotation.set(0, 0, -0.06);
   r.legL.rotation.set(0, 0, 0); r.legR.rotation.set(0, 0, 0);
+  r.foreL.rotation.set(0, 0, 0); r.foreR.rotation.set(0, 0, 0);
 
   if (s.mode === 'dying' || s.mode === 'over') {
     const t = sm(Math.min(1, s.dieT * 2.5));
@@ -525,6 +547,12 @@ export function animateSurvivor(r: Rig, s: Sim) {
     r.legL.rotation.x = 0.7 * t; r.legR.rotation.x = -0.2 * t; r.shinL.rotation.x = -1.1 * t; r.shinR.rotation.x = -0.4 * t;
     return;
   }
+  // track takeoff/landing to drive a short absorb after touchdown
+  let mem = runMem.get(r);
+  if (!mem) { mem = { air: false, land: 0, t: s.time }; runMem.set(r, mem); }
+  const dt = Math.max(0, Math.min(0.1, s.time - mem.t)); mem.t = s.time;
+  if (mem.air && !air && !sliding) mem.land = 0.22;
+  mem.air = air; mem.land = Math.max(0, mem.land - dt);
   if (sliding) {
     r.hips.position.y = 0.36; r.torso.rotation.x = 0.85; r.head.rotation.x = -0.75;
     r.legL.rotation.x = 1.4; r.legR.rotation.x = 1.05; r.shinL.rotation.x = -0.1; r.shinR.rotation.x = -0.75;
@@ -532,23 +560,45 @@ export function animateSurvivor(r: Rig, s: Sim) {
     return;
   }
   if (air) {
-    const up = Math.max(0, Math.min(1, s.vy / 10));
-    r.hips.position.y = 0.95; r.torso.rotation.x = -0.25 - up * 0.1; r.head.rotation.x = 0.2;
-    r.legL.rotation.x = 1.1; r.legR.rotation.x = 0.15 + up * 0.3; r.shinL.rotation.x = -1.55; r.shinR.rotation.x = -0.6 - up * 0.6;
-    r.armL.rotation.x = -0.8; r.armR.rotation.x = 1.3; r.armL.rotation.z = 0.35; r.armR.rotation.z = -0.25;
-    r.foreL.rotation.x = 0.7; r.foreR.rotation.x = 0.9;
+    // rising: knees tuck up under the body, arms drive up; falling: lead leg reaches for the ground
+    const up = Math.max(0, Math.min(1, s.vy / 8)); const down = Math.max(0, Math.min(1, -s.vy / 8));
+    r.hips.position.y = 0.95; r.torso.rotation.x = -0.3 - up * 0.12 + down * 0.1; r.head.rotation.x = 0.22 - down * 0.1;
+    r.legL.rotation.x = 1.15 - down * 0.55; r.legR.rotation.x = 0.55 + up * 0.35 - down * 0.45;
+    r.shinL.rotation.x = -(1.5 - down * 1.2); r.shinR.rotation.x = -(1.4 + up * 0.3 - down * 0.7);
+    r.armL.rotation.x = -0.6 + up * 0.3; r.armR.rotation.x = 1.4 - down * 0.5; r.armL.rotation.z = 0.4 + down * 0.3; r.armR.rotation.z = -0.3 - down * 0.3;
+    r.foreL.rotation.x = 0.8; r.foreR.rotation.x = 1.0;
     return;
   }
-  // run cycle: double-bob, pelvic twist + counter-rotating shoulders, knee drive on swing
-  r.hips.position.y = 0.92 + 0.05 * (0.5 + 0.5 * Math.cos(2 * p));
-  r.hips.rotation.y = sn * 0.14; r.hips.rotation.z = cs * 0.05;
-  r.torso.rotation.x = -0.24; r.torso.rotation.y = -sn * 0.3; r.torso.rotation.z = -cs * 0.04;
-  r.head.rotation.x = 0.16; r.head.rotation.y = sn * 0.18;
-  r.legL.rotation.x = 0.12 + sn * 0.9; r.legR.rotation.x = 0.12 - sn * 0.9;
-  r.shinL.rotation.x = -(0.2 + 1.45 * sm(Math.max(0, cs))) - 0.25 * Math.max(0, -sn);
-  r.shinR.rotation.x = -(0.2 + 1.45 * sm(Math.max(0, -cs))) - 0.25 * Math.max(0, sn);
-  r.armL.rotation.x = -sn * 0.85; r.armR.rotation.x = sn * 0.85;
-  r.foreL.rotation.x = 1.25 + 0.35 * Math.max(0, -sn); r.foreR.rotation.x = 1.25 + 0.35 * Math.max(0, sn);
+  // keyframed run: legs half a stride apart, body lowest at each mid-stance, highest in flight;
+  // longer strides and a deeper lean as speed builds; arms counter-swing with bent elbows
+  const u = p / (Math.PI * 2);
+  const k = Math.max(0, Math.min(1, (s.speed - 11) / 19));
+  const amp = 0.82 + 0.3 * k; const kick = 0.85 + 0.25 * k;
+  const tL = cyc(THIGH, u) * amp; const tR = cyc(THIGH, u + 0.5) * amp;
+  const kL = cyc(KNEE, u) * kick; const kR = cyc(KNEE, u + 0.5) * kick;
+  const bob = 0.5 + 0.5 * Math.cos(4 * Math.PI * (u - 0.1)); // 1 at each mid-stance, 0 mid-flight
+  const sw = (tL - tR) / 1.25; // +1 left leg forward
+  const lean = 0.3 + 0.16 * k;
+  r.hips.position.y = 0.99 - 0.08 * bob;
+  r.hips.rotation.set(-0.08 - 0.06 * k, sw * 0.13, Math.sin(2 * Math.PI * (u - 0.1)) * 0.05);
+  r.torso.rotation.set(-lean - 0.04 * bob, -sw * 0.3, -Math.sin(2 * Math.PI * (u - 0.1)) * 0.03);
+  r.head.rotation.set(0.12 + lean * 0.5 + 0.03 * bob, sw * 0.1, 0);
+  r.legL.rotation.x = tL; r.legR.rotation.x = tR;
+  r.shinL.rotation.x = -kL; r.shinR.rotation.x = -kR;
+  // arms: drive forward-up to shoulder height and back past the hip, elbows ~90°, hands swinging slightly across the body
+  const aw = 1.1 + 0.3 * k;
+  // arms held out from the body (elbows wide) so they read clearly from the chase camera behind
+  r.armL.rotation.set(-sw * aw, 0, -0.32 - Math.abs(sw) * 0.1); r.armR.rotation.set(sw * aw, 0, 0.32 + Math.abs(sw) * 0.1);
+  // elbow closes as the arm drives forward (hand up by the chin), opens on the backswing (hand past the hip)
+  r.foreL.rotation.x = 1.15 + 0.55 * Math.max(0, -sw) - 0.3 * Math.max(0, sw); r.foreR.rotation.x = 1.15 + 0.55 * Math.max(0, sw) - 0.3 * Math.max(0, -sw);
+  // forearms rolled so the palms face in (loose fists), not up like carrying a tray
+  r.foreL.rotation.y = 1.1; r.foreR.rotation.y = -1.1;
+  // landing: knees and hips absorb the drop for a moment after touchdown
+  if (mem.land > 0) {
+    const a = Math.sin(Math.min(1, mem.land / 0.22) * Math.PI);
+    r.hips.position.y -= 0.13 * a; r.torso.rotation.x -= 0.18 * a;
+    r.shinL.rotation.x -= 0.5 * a; r.shinR.rotation.x -= 0.5 * a; r.legL.rotation.x += 0.25 * a; r.legR.rotation.x += 0.25 * a;
+  }
   // panic glance over the shoulder when the horde is close
   const near = Math.max(0, Math.min(1, (2.2 - s.horde) / 1.4));
   if (near > 0) { const g = Math.max(0, Math.sin(s.time * 1.7)) ** 6 * near; r.head.rotation.y += g * 1.1; r.torso.rotation.y += g * 0.25; }
@@ -621,6 +671,37 @@ export function animateZombieCrawl(r: Rig, g: ZombieGait, t: number) {
   r.shinL.rotation.x = -0.15; r.shinR.rotation.x = -0.15;
   r.armL.rotation.set(2.6 + sn * 0.45, 0, -0.2); r.armR.rotation.set(2.6 - sn * 0.45, 0, 0.2);
   r.foreL.rotation.x = 0.2 + Math.max(0, cs) * 0.5; r.foreR.rotation.x = 0.2 + Math.max(0, -cs) * 0.5;
+}
+
+/** Sprinter: feral full-tilt charge, torso pitched low, head craned up at its prey, arms flung back and flailing. */
+export function animateZombieSprint(r: Rig, g: ZombieGait, t: number) {
+  const sn = Math.sin(t); const cs = Math.cos(t);
+  r.root.rotation.z = sn * 0.12;
+  r.hips.position.y = 0.88 + Math.abs(cs) * 0.1;
+  r.hips.rotation.set(-0.15, sn * 0.25, 0);
+  r.torso.rotation.set(-0.85 + Math.abs(cs) * 0.1, -sn * 0.3, g.tilt * 0.3);
+  r.head.rotation.set(-0.55 + Math.sin(t * 5.3) * 0.12, Math.sin(t * 13) * 0.1, g.tilt * 0.5 + Math.sin(t * 9) * 0.08);
+  r.legL.rotation.set(0.35 + sn * 1.25, 0, 0); r.legR.rotation.set(0.35 - sn * 1.25, 0, 0);
+  r.shinL.rotation.x = -(0.3 + 1.7 * sm(Math.max(0, cs))); r.shinR.rotation.x = -(0.3 + 1.7 * sm(Math.max(0, -cs)));
+  // arms thrown back and out like it is falling forward into you, clawing every few strides
+  const claw = Math.max(0, Math.sin(t * 0.5)) ** 4;
+  r.armL.rotation.set(-0.9 + sn * 0.7 + claw * 2.6, 0, -0.5 - claw * 0.2); r.armR.rotation.set(-0.9 - sn * 0.7 + claw * 2.4, 0, 0.5 + claw * 0.2);
+  r.foreL.rotation.x = 0.4 + Math.max(0, cs) * 0.6; r.foreR.rotation.x = 0.4 + Math.max(0, -cs) * 0.6;
+}
+
+/** Brute: slow, heavy, rolling stomp; huge arms hang to the knees and swing wide; hunched with its head low. */
+export function animateZombieBrute(r: Rig, g: ZombieGait, t: number) {
+  const sn = Math.sin(t); const cs = Math.cos(t);
+  const stomp = Math.abs(sn) ** 3; // weight lands hard on each step
+  r.root.rotation.z = sn * 0.16;
+  r.hips.position.y = 0.9 - stomp * 0.06;
+  r.hips.rotation.set(0, sn * 0.22, sn * 0.08);
+  r.torso.rotation.set(-0.55 - stomp * 0.08, -sn * 0.28, -sn * 0.1);
+  r.head.rotation.set(0.35 + stomp * 0.1, sn * 0.15, g.tilt * 0.4);
+  r.legL.rotation.set(0.05 + sn * 0.55, 0, -0.18); r.legR.rotation.set(0.05 - sn * 0.55, 0, 0.18);
+  r.shinL.rotation.x = -(0.2 + 0.8 * sm(Math.max(0, cs))); r.shinR.rotation.x = -(0.2 + 0.8 * sm(Math.max(0, -cs)));
+  r.armL.rotation.set(0.25 - sn * 0.5, 0, -0.35 - Math.abs(sn) * 0.15); r.armR.rotation.set(0.25 + sn * 0.5, 0, 0.35 + Math.abs(sn) * 0.15);
+  r.foreL.rotation.x = 0.25 + Math.max(0, -sn) * 0.4; r.foreR.rotation.x = 0.25 + Math.max(0, sn) * 0.4;
 }
 
 /** Clone a built rig sharing geometry/material (pooled walkers). */

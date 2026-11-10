@@ -4,14 +4,14 @@ import { GLView, type ExpoWebGLRenderingContext } from 'expo-gl';
 import * as THREE from 'three';
 import { Feather } from '@expo/vector-icons';
 import colors, { scene as C } from '@/constants/colors';
-import { GAP_LEN, OB_POOL_CAP, STAGE_KINDS, STAGE_LEN, routeInfo, simObstaclePoolIndex, simStageAt, stageAt, type Sim, type StageId } from '@/lib/game';
+import { GAP_LEN, OB_POOL_CAP, STAGE_KINDS, STAGE_LEN, routeInfo, simObstaclePoolIndex, simStageAt, stageAt, type Sim, type StageId, type WalkerType } from '@/lib/game';
 import { textGeo } from '@/components/pixelText';
 import { buildThemedObstacles } from '@/components/themedObstacles';
 import { createIntro, type Intro } from '@/components/IntroCinematic';
 import { createMissionCutscene, type MissionCutscene } from '@/components/MissionCutscene';
 import { buildMissionScenery, type Placer } from '@/components/missionScenery';
 import { missionById } from '@/lib/campaign';
-import { animateSurvivor, animateZombie, animateZombieCharge, animateZombieCrawl, buildSurvivor, buildZombie, cloneRig, ZOMBIE_KINDS, type OutfitLook } from '@/components/characters';
+import { animateSurvivor, animateZombie, animateZombieBrute, animateZombieCharge, animateZombieCrawl, animateZombieSprint, buildSurvivor, buildZombie, cloneRig, ZOMBIE_KINDS, type OutfitLook } from '@/components/characters';
 
 const T = colors.light;
 const LW = 2.0; // metres between lane centres
@@ -52,6 +52,23 @@ function makeFacadeGeo(seed: number) {
   const g = new THREE.BufferGeometry();
   g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
   g.setAttribute('color', new THREE.Float32BufferAttribute(col, 3));
+  return g;
+}
+
+/** Merge coloured boxes [sx, sy, sz, x, y, z, rx, colour] into one vertex-coloured geometry (one draw call). */
+type CBox = [number, number, number, number, number, number, number, string];
+function boxesGeo(list: CBox[]) {
+  const pos: number[] = []; const nor: number[] = []; const col: number[] = [];
+  const m = new THREE.Matrix4(); const q = new THREE.Quaternion(); const e = new THREE.Euler(); const c = new THREE.Color();
+  for (const [sx, sy, sz, x, y, z, rx, hex] of list) {
+    const b = new THREE.BoxGeometry(sx, sy, sz).toNonIndexed();
+    m.compose(new THREE.Vector3(x, y, z), q.setFromEuler(e.set(rx, 0, 0)), new THREE.Vector3(1, 1, 1)); b.applyMatrix4(m);
+    const P = b.attributes.position; const N = b.attributes.normal; c.set(hex);
+    for (let i = 0; i < P.count; i++) { pos.push(P.getX(i), P.getY(i), P.getZ(i)); nor.push(N.getX(i), N.getY(i), N.getZ(i)); col.push(c.r, c.g, c.b); }
+    b.dispose();
+  }
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3)); g.setAttribute('normal', new THREE.Float32BufferAttribute(nor, 3)); g.setAttribute('color', new THREE.Float32BufferAttribute(col, 3));
   return g;
 }
 
@@ -137,20 +154,113 @@ function createEngine(gl: ExpoWebGLRenderingContext, w: number, h: number) {
   const cracks: THREE.Mesh[] = [];
   for (let i = 0; i < 12; i++) { const c = new THREE.Mesh(crackGeo, crackMat); c.rotation.order = 'YXZ'; world.add(c); cracks.push(c); }
 
+  // worn lane dashes between the three lanes (city streets)
+  const dashM = regM(basic(C.laneMark, { transparent: true, opacity: 0.32, depthWrite: false }));
+  const dashGeo = reg(new THREE.PlaneGeometry(0.12, 2.6));
+  const dashes: THREE.Mesh[] = [];
+  for (let i = 0; i < 20; i++) { const m = new THREE.Mesh(dashGeo, dashM); m.rotation.x = -Math.PI / 2; m.visible = false; world.add(m); dashes.push(m); }
+
+  // drifting air: embers rising from fires and falling ash outside, dust motes indoors
+  const dotTex = (() => {
+    const n = 16; const data = new Uint8Array(n * n * 4);
+    for (let y = 0; y < n; y++) for (let x = 0; x < n; x++) {
+      const dd = Math.hypot(x + 0.5 - n / 2, y + 0.5 - n / 2) / (n / 2); const a = Math.max(0, 1 - dd) ** 1.6;
+      const i = (y * n + x) * 4; data[i] = 255; data[i + 1] = 255; data[i + 2] = 255; data[i + 3] = Math.round(a * 255);
+    }
+    const t = new THREE.DataTexture(data, n, n); t.needsUpdate = true; return t;
+  })();
+  const AIR = { x: 11, y0: 0.2, y1: 9, z0: -50, z1: 7 };
+  const mkCloud = (n: number, color: string, size: number, opacity: number, additive: boolean) => {
+    const pos = new Float32Array(n * 3);
+    for (let i = 0; i < n; i++) { pos[i * 3] = (Math.random() * 2 - 1) * AIR.x; pos[i * 3 + 1] = AIR.y0 + Math.random() * (AIR.y1 - AIR.y0); pos[i * 3 + 2] = AIR.z0 + Math.random() * (AIR.z1 - AIR.z0); }
+    const geo = reg(new THREE.BufferGeometry()); geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+    const mat = regM(new THREE.PointsMaterial({ color, size, map: dotTex, transparent: true, opacity, depthWrite: false, blending: additive ? THREE.AdditiveBlending : THREE.NormalBlending, sizeAttenuation: true }));
+    const pts = new THREE.Points(geo, mat); pts.frustumCulled = false; scn.add(pts);
+    return { pts, pos, mat, n };
+  };
+  const embers = mkCloud(90, '#FF9248', 0.13, 0.9, true);
+  const ash = mkCloud(150, '#B9B0B6', 0.09, 0.55, false);
+  const ASH_TINT: Record<StageId, [string, number]> = { city: ['#B9B0B6', 0.55], police: ['#9FB0D0', 0.28], hospital: ['#FFFFFF', 0.3] };
+  let airT = -1; let airD = 0;
+  const stepAir = (s: Sim, st: StageId) => {
+    const dt = airT < 0 ? 0 : Math.max(0, Math.min(0.05, s.time - airT)); airT = s.time;
+    const dd = Math.max(0, Math.min(3, s.dist - airD)); airD = s.dist;
+    const span = AIR.z1 - AIR.z0;
+    embers.pts.visible = st === 'city';
+    if (embers.pts.visible) for (let i = 0; i < embers.n; i++) {
+      const j = i * 3; const p = embers.pos;
+      p[j + 2] += dd; p[j + 1] += dt * (0.6 + (i % 5) * 0.12); p[j] += Math.sin(s.time * 1.3 + i) * dt * 0.35;
+      if (p[j + 2] > AIR.z1) { p[j + 2] -= span; p[j] = (Math.random() * 2 - 1) * AIR.x; }
+      if (p[j + 1] > AIR.y1) p[j + 1] = AIR.y0;
+    }
+    for (let i = 0; i < ash.n; i++) {
+      const j = i * 3; const p = ash.pos;
+      p[j + 2] += dd; p[j + 1] -= dt * (0.22 + (i % 7) * 0.04); p[j] += Math.sin(s.time * 0.7 + i * 1.7) * dt * 0.25;
+      if (p[j + 2] > AIR.z1) { p[j + 2] -= span; p[j] = (Math.random() * 2 - 1) * AIR.x; }
+      if (p[j + 1] < AIR.y0) p[j + 1] = AIR.y1;
+    }
+    embers.pts.geometry.attributes.position.needsUpdate = true; ash.pts.geometry.attributes.position.needsUpdate = true;
+    const [tc, to] = ASH_TINT[st]; ash.mat.color.set(tc); ash.mat.opacity = to;
+    return dt;
+  };
+
+  // dust kicked up on landing and at the start of a slide
+  const dustGeo = reg(new THREE.CircleGeometry(0.5, 14));
+  const DUST_TINT: Record<StageId, string> = { city: '#A0948C', police: '#8C98AC', hospital: '#DCE4DE' };
+  const dusts = Array.from({ length: 6 }, () => {
+    const m = new THREE.Mesh(dustGeo, regM(basic('#A0948C', { transparent: true, opacity: 0, depthWrite: false })));
+    m.rotation.x = -Math.PI / 2; m.visible = false; world.add(m); return { m, age: 9, at: 0, x: 0 };
+  });
+  let dustNext = 0; let prevJy = 0; let prevSlide = 0;
+  const puff = (atDist: number, x: number, st: StageId) => {
+    for (const off of [-0.25, 0.25]) {
+      const dp = dusts[dustNext]; dustNext = (dustNext + 1) % dusts.length;
+      dp.age = 0; dp.at = atDist; dp.x = x + off; (dp.m.material as THREE.MeshBasicMaterial).color.set(DUST_TINT[st]);
+    }
+  };
+
   // buildings
   const bMats = [regM(lam(C.bldA)), regM(lam(C.bldB)), regM(lam(C.bldC))];
   const trimMat = regM(lam(C.bldTrim));
   const winMat = regM(new THREE.MeshBasicMaterial({ vertexColors: true }));
   const facades = [reg(makeFacadeGeo(1)), reg(makeFacadeGeo(2)), reg(makeFacadeGeo(3))];
   const BSP = 10;
-  type Bld = { g: THREE.Group; body: THREE.Mesh; face: THREE.Mesh; roof: THREE.Mesh };
+  // street level: shuttered, smashed or boarded shopfronts (with or without a torn awning) and rooftop
+  // tanks/AC units, each pre-merged into one vertex-coloured mesh; only the glowing shop sign is separate.
+  // Shopfront geometry is built in unit depth (z) and scaled by the building depth.
+  const kitMat = regM(new THREE.MeshLambertMaterial({ vertexColors: true }));
+  const AWN = ['#8C3A34', '#2F5E5A', '#8A7240', '#3C4A6E'];
+  const shopGeos: THREE.BufferGeometry[] = [];
+  for (let kind = 0; kind < 3; kind++) for (let aw = -1; aw < 4; aw++) {
+    const L2: CBox[] = [];
+    if (kind === 0) { L2.push([0.14, 3.1, 0.84, 0.07, 1.55, 0, 0, '#34323A']); for (let i = 0; i < 5; i++) L2.push([0.03, 0.05, 0.8, 0.15, 0.5 + i * 0.52, 0, 0, '#1E1C22']); L2.push([0.05, 2.3, 0.14, 0.17, 1.15, 0.22, 0, '#15181F']); }
+    if (kind === 1) { L2.push([0.14, 3.1, 0.84, 0.07, 1.55, 0, 0, '#15181F']); L2.push([0.06, 0.12, 0.86, 0.16, 3.05, 0, 0, '#2A2630']); L2.push([0.06, 0.12, 0.86, 0.16, 0.08, 0, 0, '#2A2630']); L2.push([0.06, 3.1, 0.03, 0.16, 1.55, 0.1, 0, '#2A2630']); L2.push([0.02, 0.6, 0.18, 0.18, 1.0, -0.25, 0.4, '#5A6470']); }
+    if (kind === 2) { L2.push([0.14, 3.1, 0.84, 0.07, 1.55, 0, 0, '#2A2630']); for (let i = 0; i < 5; i++) L2.push([0.04, 0.2, 0.86, 0.16, 0.5 + i * 0.55, 0, (hash(i + kind * 7) - 0.5) * 0.25, i % 2 ? '#6A5440' : '#7A6248']); }
+    if (aw >= 0) L2.push([1.3, 0.1, 0.78, 0.62, 3.35, 0, 0, AWN[aw]]);
+    const geo = reg(boxesGeo(L2));
+    if (aw >= 0) { // tilt the awning (last 36 verts) down and away from the wall
+      const P = geo.attributes.position; const start = P.count - 36;
+      for (let i = start; i < P.count; i++) { const x = P.getX(i) - 0.0; const dy = -(x - 0.0) * 0.32; P.setY(i, P.getY(i) + dy); }
+    }
+    shopGeos.push(geo);
+  }
+  const roofGeos = [
+    reg(boxesGeo([[1.5, 1.7, 1.5, 0, 1.2, 0, 0, '#4A4248'], [1.6, 0.12, 1.6, 0, 2.1, 0, 0, '#3A3238'], [0.08, 0.9, 0.08, 0.6, 0.45, 0.6, 0, '#2E2A34'], [0.08, 0.9, 0.08, -0.6, 0.45, -0.6, 0, '#2E2A34']])),
+    reg(boxesGeo([[1.1, 0.6, 1.6, 0, 0.65, 0, 0, '#5A5458'], [0.9, 0.04, 0.9, 0, 0.97, 0, 0, '#2E2A34'], [1.1, 0.6, 1.6, 0, 0.65, 2.2, 0, '#5A5458']])),
+    reg(boxesGeo([[0.12, 2.4, 0.12, 0, 1.55, 0, 0, '#2E2A34'], [0.9, 0.06, 0.06, 0, 2.6, 0, 0, '#2E2A34'], [1.1, 0.6, 1.6, 1.4, 0.65, 0.4, 0, '#5A5458']])),
+  ];
+  const signMats = [regM(basic('#F0A24C')), regM(basic('#78D2C6')), regM(basic('#E25C5C')), regM(lam('#3A3640'))];
+  type Bld = { g: THREE.Group; body: THREE.Mesh; face: THREE.Mesh; roof: THREE.Mesh; shop: THREE.Mesh; sign: THREE.Mesh; kit: THREE.Mesh };
   const blds: Bld[] = [];
   for (let k = 0; k < 46; k++) {
     const g = new THREE.Group();
     const body = new THREE.Mesh(unit, bMats[0]); g.add(body);
     const face = new THREE.Mesh(facades[0], winMat); g.add(face);
     const roof = new THREE.Mesh(unit, trimMat); g.add(roof);
-    g.visible = false; world.add(g); blds.push({ g, body, face, roof });
+    const shop = new THREE.Mesh(shopGeos[0], kitMat); g.add(shop);
+    const sign = new THREE.Mesh(unit, signMats[0]); g.add(sign);
+    const kit = new THREE.Mesh(roofGeos[0], kitMat); g.add(kit);
+    g.visible = false; world.add(g); blds.push({ g, body, face, roof, shop, sign, kit });
   }
 
   // street lamps
@@ -177,7 +287,35 @@ function createEngine(gl: ExpoWebGLRenderingContext, w: number, h: number) {
   const glassMat = regM(lam(C.glass)); const tireMat = regM(lam(C.tire));
   const wheelGeo = reg(new THREE.CylinderGeometry(0.34, 0.34, 0.24, 10));
   const CSP = 27;
-  const cars: { g: THREE.Group; body: THREE.Mesh }[] = [];
+  // some wrecks are still burning: two flickering flame cones and a warm glow on the ground
+  // fire: several thin additive flame tongues licking at different rates over a hot core, a warm ground
+  // glow and a dark smoke plume; reads as fire rather than solid geometry
+  const flameM = regM(basic('#FF6A1E', { transparent: true, opacity: 0.75, depthWrite: false, blending: THREE.AdditiveBlending }));
+  const flameCoreM = regM(basic('#FFD07A', { transparent: true, opacity: 0.85, depthWrite: false, blending: THREE.AdditiveBlending }));
+  const fireGlowM = regM(basic('#FF7A30', { transparent: true, opacity: 0.2, depthWrite: false, blending: THREE.AdditiveBlending }));
+  const smokeColM = regM(basic('#2A2228', { transparent: true, opacity: 0.32, depthWrite: false }));
+  const flameGeo = reg(new THREE.ConeGeometry(0.22, 1.1, 5, 1, true)); const coreGeo = reg(new THREE.ConeGeometry(0.2, 0.55, 6, 1, true));
+  const glowGeo = reg(new THREE.CircleGeometry(2.2, 18)); const plumeGeo = reg(new THREE.CylinderGeometry(1.1, 0.35, 5, 7, 1, true));
+  type Fire = { f: THREE.Group; tongues: THREE.Mesh[]; core: THREE.Mesh; plume: THREE.Mesh };
+  const makeFire = (scale: number, smoke = true): Fire => {
+    const f = new THREE.Group();
+    const tongues = [[-0.22, 0.05], [0.2, -0.1], [0, 0.18], [0.05, -0.2]].map(([x, z], i) => {
+      const m = new THREE.Mesh(flameGeo, flameM); m.position.set(x, 0.5, z); m.rotation.set((i - 1.5) * 0.12, 0, (i % 2 ? 1 : -1) * 0.15); f.add(m); return m;
+    });
+    const core = new THREE.Mesh(coreGeo, flameCoreM); core.position.y = 0.26; f.add(core);
+    const gl2 = new THREE.Mesh(glowGeo, fireGlowM); gl2.rotation.x = -Math.PI / 2; gl2.position.y = 0.03; f.add(gl2);
+    const plume = new THREE.Mesh(plumeGeo, smokeColM); plume.position.y = 3.4; plume.visible = smoke; f.add(plume);
+    f.scale.setScalar(scale); return { f, tongues, core, plume };
+  };
+  const flicker = (fi: Fire, t: number, seed: number) => {
+    for (let i = 0; i < fi.tongues.length; i++) {
+      const n = Math.sin(t * (13 + i * 4) + seed + i * 2.1) * 0.5 + Math.sin(t * (23 + i * 3) + seed * 1.7 + i) * 0.35;
+      const m = fi.tongues[i]; m.scale.set(1 - n * 0.2, 0.75 + n * 0.45 + (i === 2 ? 0.3 : 0), 1 - n * 0.2); m.position.y = 0.45 + m.scale.y * 0.1;
+    }
+    const c = Math.sin(t * 31 + seed) * 0.15; fi.core.scale.set(1 + c, 1 - c, 1 + c);
+    fi.plume.rotation.y = t * 0.4 + seed;
+  };
+  const cars: { g: THREE.Group; body: THREE.Mesh; fire: Fire }[] = [];
   for (let k = 0; k < 8; k++) {
     const g = new THREE.Group();
     const body = new THREE.Mesh(unit, carMats[0]); body.scale.set(1.8, 0.65, 4.1); body.position.y = 0.62; g.add(body);
@@ -185,7 +323,33 @@ function createEngine(gl: ExpoWebGLRenderingContext, w: number, h: number) {
     for (const wx of [-0.85, 0.85]) for (const wz of [-1.35, 1.35]) {
       const wh = new THREE.Mesh(wheelGeo, tireMat); wh.rotation.z = Math.PI / 2; wh.position.set(wx, 0.32, wz); g.add(wh);
     }
-    g.visible = false; world.add(g); cars.push({ g, body });
+    const fire = makeFire(1.1); fire.f.position.set(0, 0.95, 0.9); g.add(fire.f);
+    g.visible = false; world.add(g); cars.push({ g, body, fire });
+  }
+
+  // city sidewalk clutter against the building line: trash bags, burning barrels, cones, hydrants, debris
+  const bagM = regM(lam('#262E28')); const bagM2 = regM(lam('#3A3A44')); const barrelM = regM(lam('#7A4632')); const hydrantM = regM(lam('#B8423A'));
+  const coneM = regM(lam('#E8792E')); const coneStripe = regM(lam('#EDE6DA')); const paperM = regM(lam('#CFC6B4'));
+  const debrisConcrete = regM(lam(C.concrete)); const debrisSteel = regM(lam('#3A4250'));
+  const mkc = (parent: THREE.Object3D, mat: THREE.Material, sx: number, sy: number, sz: number, x: number, y: number, z: number, ry = 0) => {
+    const m = new THREE.Mesh(unit, mat); m.scale.set(sx, sy, sz); m.position.set(x, y, z); m.rotation.set(0, ry, 0); parent.add(m); return m;
+  };
+  const bagGeo = reg(new THREE.DodecahedronGeometry(0.42, 0)); const barrelGeo = reg(new THREE.CylinderGeometry(0.34, 0.34, 0.95, 10));
+  const coneGeo = reg(new THREE.ConeGeometry(0.2, 0.62, 8)); const hydGeo = reg(new THREE.CylinderGeometry(0.14, 0.17, 0.7, 8));
+  type ClutterKind = 'bags' | 'barrel' | 'cones' | 'hydrant' | 'debris';
+  const CLUTTER: ClutterKind[] = ['bags', 'bags', 'barrel', 'cones', 'hydrant', 'debris'];
+  const clutterMake: Record<ClutterKind, () => { g: THREE.Group; fire?: Fire }> = {
+    bags: () => { const g = new THREE.Group(); for (let i = 0; i < 4; i++) { const m = new THREE.Mesh(bagGeo, i % 2 ? bagM2 : bagM); m.position.set((hash(i + 1) - 0.5) * 0.9, 0.3 + (i === 3 ? 0.35 : 0), (i - 1.5) * 0.45); m.scale.set(1, 0.8 + hash(i) * 0.3, 1); m.rotation.set(i, i * 1.7, 0); g.add(m); } return { g }; },
+    barrel: () => { const g = new THREE.Group(); const b = new THREE.Mesh(barrelGeo, barrelM); b.position.y = 0.48; g.add(b); const fi = makeFire(0.6, false); fi.f.position.y = 0.96; g.add(fi.f); return { g, fire: fi }; },
+    cones: () => { const g = new THREE.Group(); for (let i = 0; i < 3; i++) { const c = new THREE.Mesh(coneGeo, coneM); c.position.set(0.3 - i * 0.25, 0.31, (i - 1) * 0.7); if (i === 2) { c.rotation.z = 1.5; c.position.y = 0.2; } g.add(c); const st = new THREE.Mesh(unit, coneStripe); st.scale.set(0.27, 0.07, 0.27); st.position.set(c.position.x, i === 2 ? 0.2 : 0.34, c.position.z); st.visible = i !== 2; g.add(st); } return { g }; },
+    hydrant: () => { const g = new THREE.Group(); const h = new THREE.Mesh(hydGeo, hydrantM); h.position.y = 0.35; g.add(h); mkc(g, hydrantM, 0.45, 0.12, 0.12, 0, 0.45, 0); mkc(g, hydrantM, 0.2, 0.12, 0.2, 0, 0.75, 0); return { g }; },
+    debris: () => { const g = new THREE.Group(); for (let i = 0; i < 3; i++) mkc(g, paperM, 0.4, 0.01, 0.3, (hash(i + 7) - 0.5) * 1.2, 0.02, (i - 1) * 0.6, i * 1.3); mkc(g, debrisConcrete, 0.7, 0.25, 0.5, -0.2, 0.12, 0.3, 0.6); mkc(g, debrisSteel, 1.6, 0.05, 0.05, 0.1, 0.05, -0.2, 0.3); return { g }; },
+  };
+  const clutterPools = {} as Record<ClutterKind, { g: THREE.Group; fire?: Fire }[]>;
+  const clutterUse = {} as Record<ClutterKind, number>;
+  for (const kd of ['bags', 'barrel', 'cones', 'hydrant', 'debris'] as const) {
+    clutterPools[kd] = Array.from({ length: kd === 'bags' ? 8 : 5 }, () => { const it = clutterMake[kd](); it.g.visible = false; world.add(it.g); return it; });
+    clutterUse[kd] = 0;
   }
 
   // junction props: dead-end barricade + mirrored arrow signage (scale.x = dir)
@@ -370,8 +534,44 @@ function createEngine(gl: ExpoWebGLRenderingContext, w: number, h: number) {
     return { r: zb.rig, gait: zb.gait, sh, lane: [-0.25, 0.85, -0.95, 0.35, 1.05][i], off: [0, 0.9, 1.4, 2.4, 3.1][i], ph: i * 1.7 };
   });
 
+  // special infected looks, applied per pooled slot when its type changes:
+  // sprinter = flushed skin + glowing red eyes; brute = bruised, hulking proportions + dim amber eyes;
+  // crawler = pale, legless torso with a gory stump and a blood smear dragged behind it
+  const LOOK_MAT: Record<WalkerType, THREE.Material> = {
+    walker: charMat,
+    sprinter: regM(new THREE.MeshLambertMaterial({ vertexColors: true, color: '#F0B4A8' })),
+    brute: regM(new THREE.MeshLambertMaterial({ vertexColors: true, color: '#A4949E' })),
+    crawler: regM(new THREE.MeshLambertMaterial({ vertexColors: true, color: '#E2E8D0', emissive: '#2C3424' })),
+  };
+  const eyeRed = regM(basic('#FF2A1A', { transparent: true, opacity: 1, depthWrite: false, blending: THREE.AdditiveBlending }));
+  const eyeAmber = regM(basic('#FFAA30', { transparent: true, opacity: 0.8, depthWrite: false, blending: THREE.AdditiveBlending }));
+  const eyeGlowM = regM(basic('#FF3A20', { transparent: true, opacity: 0.35, depthWrite: false, blending: THREE.AdditiveBlending }));
+  const eyeGeo = reg(new THREE.SphereGeometry(0.017, 8, 6)); const eyeGlowGeo = reg(new THREE.SphereGeometry(0.05, 8, 6));
+  const stumpM = regM(lam('#5A1A1C')); const stumpGeo = reg(new THREE.DodecahedronGeometry(0.13, 0));
+  const trailM = regM(basic('#4A0E10', { transparent: true, opacity: 0.55, depthWrite: false }));
+  const trailGeo = reg(new THREE.PlaneGeometry(0.42, 3.2));
+  type Slot = { r: ReturnType<typeof cloneRig>; gait: ReturnType<typeof buildZombie>['gait']; sh: THREE.Mesh; used: boolean; look: WalkerType | null; body: THREE.Mesh[]; eyes: THREE.Group; eyeMats: THREE.Mesh[]; stump: THREE.Mesh; trail: THREE.Mesh };
+  const BONES = ['hips', 'torso', 'head', 'armL', 'armR', 'foreL', 'foreR', 'legL', 'legR', 'shinL', 'shinR'] as const;
+  const applyLook = (sl: Slot, type: WalkerType) => {
+    if (sl.look === type) return; sl.look = type;
+    for (const m of sl.body) m.material = LOOK_MAT[type] ?? charMat;
+    const r = sl.r;
+    for (const b of BONES) r[b].scale.set(1, 1, 1);
+    r.legL.visible = r.legR.visible = type !== 'crawler';
+    sl.stump.visible = sl.trail.visible = type === 'crawler';
+    sl.eyes.visible = type === 'sprinter' || type === 'brute';
+    for (const e of sl.eyeMats) e.material = type === 'brute' ? eyeAmber : eyeRed;
+    if (type === 'brute') {
+      // hulking: barrel chest, massive arms and hands, thick legs, small head sunk between the shoulders
+      r.torso.scale.set(1.45, 1.15, 1.5); r.head.scale.setScalar(0.7);
+      r.armL.scale.set(1.35, 1.15, 1.35); r.armR.scale.set(1.35, 1.15, 1.35); r.foreL.scale.set(1.25, 1.1, 1.25); r.foreR.scale.set(1.25, 1.1, 1.25);
+      r.legL.scale.set(1.45, 1.0, 1.45); r.legR.scale.set(1.45, 1.0, 1.45); r.hips.scale.set(1.3, 1, 1.3);
+    } else if (type === 'sprinter') {
+      r.torso.scale.set(0.92, 1.02, 0.9); r.legL.scale.set(0.92, 1.06, 0.92); r.legR.scale.set(0.92, 1.06, 0.92);
+    }
+  };
   // incoming walkers: one sculpted base per kind, clones share geometry; WALKER_PER_KIND each
-  const walkerPools: { r: ReturnType<typeof cloneRig>; gait: ReturnType<typeof buildZombie>['gait']; sh: THREE.Mesh; used: boolean }[][] = [];
+  const walkerPools: Slot[][] = [];
   for (let k = 0; k < ZOMBIE_KINDS; k++) {
     const needed = Object.values(STAGE_KINDS).some((ks) => ks.includes(k));
     if (!needed) { walkerPools.push([]); continue; }
@@ -380,7 +580,16 @@ function createEngine(gl: ExpoWebGLRenderingContext, w: number, h: number) {
       const r = i === 0 ? base.rig : cloneRig(base.rig);
       r.root.visible = false; world.add(r.root);
       const sh = new THREE.Mesh(shadowGeo, shadowMat); sh.rotation.x = -Math.PI / 2; sh.visible = false; world.add(sh);
-      return { r, gait: base.gait, sh, used: false };
+      const body = BONES.map((b) => r[b].children[0] as THREE.Mesh);
+      const eyes = new THREE.Group(); const eyeMats: THREE.Mesh[] = [];
+      for (const ex of [-0.035, 0.035]) {
+        const e = new THREE.Mesh(eyeGeo, eyeRed); e.position.set(ex, 0.115, -0.11); eyes.add(e); eyeMats.push(e);
+        const gw = new THREE.Mesh(eyeGlowGeo, eyeGlowM); gw.position.set(ex, 0.115, -0.115); eyes.add(gw);
+      }
+      eyes.visible = false; r.head.add(eyes);
+      const stump = new THREE.Mesh(stumpGeo, stumpM); stump.position.set(0, -0.12, 0); stump.scale.set(1.1, 0.6, 0.9); stump.visible = false; r.hips.add(stump);
+      const trail = new THREE.Mesh(trailGeo, trailM); trail.rotation.x = -Math.PI / 2; trail.position.set(0, 0.025, 1.9); trail.visible = false; r.root.add(trail);
+      return { r, gait: base.gait, sh, used: false, look: null, body, eyes, eyeMats, stump, trail };
     }));
   }
 
@@ -495,6 +704,7 @@ function createEngine(gl: ExpoWebGLRenderingContext, w: number, h: number) {
     let bi2 = 0; let li = 0; let ci2 = 0; pi = 0; let cl = 0; let sb = 0; const signUse = { police: 0, hospital: 0 };
     for (const k in propUse) propUse[k] = 0;
     routeUse.alley = 0; routeUse.collapsed = 0;
+    for (const kd in clutterUse) clutterUse[kd as ClutterKind] = 0;
     for (let k = 0; k < segs.length; k++) {
       const g = segs[k];
       if (!g.on) continue;
@@ -529,6 +739,14 @@ function createEngine(gl: ExpoWebGLRenderingContext, w: number, h: number) {
           b2.body.scale.set(bw, bh, bd); b2.body.position.set(0, bh / 2, 0); b2.body.material = bMats[Math.floor(hash(seed + 3) * 3)];
           b2.face.scale.set(bw, bh * 0.82, bd); b2.face.position.set(0, bh * 0.47, 0); b2.face.geometry = facades[Math.floor(hash(seed + 4) * 3)];
           b2.roof.scale.set(bw + 0.3, 0.35, bd + 0.3); b2.roof.position.set(0, bh + 0.17, 0);
+          // ground floor shopfront on the street face (+x), shop sign above it, kit on the roof
+          const fx = bw / 2;
+          b2.shop.geometry = shopGeos[Math.floor(hash(seed + 5) * 3) * 5 + Math.floor(hash(seed + 7) * 5)];
+          b2.shop.scale.set(1, 1, bd); b2.shop.position.set(fx, 0, 0);
+          b2.sign.visible = hash(seed + 10) > 0.3; b2.sign.material = signMats[hash(seed + 11) > 0.8 ? 3 : Math.floor(hash(seed + 12) * 3)];
+          b2.sign.scale.set(0.1, 0.75, bd * (0.35 + hash(seed + 13) * 0.25)); b2.sign.position.set(fx + 0.12, 3.95, (hash(seed + 14) - 0.5) * bd * 0.3);
+          b2.kit.visible = hash(seed + 15) > 0.3; b2.kit.geometry = roofGeos[Math.floor(hash(seed + 16) * 3)];
+          b2.kit.position.set((hash(seed + 17) - 0.5) * (bw - 3), bh + 0.35, (hash(seed + 18) - 0.5) * (bd - 4)); b2.kit.rotation.y = hash(seed + 19) > 0.5 ? Math.PI / 2 : 0;
           at(g, n * BSP, sg * (HW + SW + bw / 2));
           b2.g.visible = true; b2.g.position.set(P.x, 0, P.z); b2.g.rotation.set(0, g.yaw + (sg < 0 ? 0 : Math.PI), 0);
         }
@@ -551,6 +769,18 @@ function createEngine(gl: ExpoWebGLRenderingContext, w: number, h: number) {
           cr.g.visible = true; cr.g.position.set(P.x, g.y, P.z);
           cr.g.rotation.set(0, g.yaw + (hash(sd + 1) - 0.5) * 0.9, sg * hash(sd + 2) * 0.12);
           cr.body.material = carMats[Math.floor(hash(sd + 3) * 3)];
+          cr.fire.f.visible = hash(sd + 4) > 0.7; if (cr.fire.f.visible) flicker(cr.fire, s.time, sd);
+        }
+        // city clutter tucked against the building line
+        const toff = sg > 0 ? 5 : 1;
+        for (let n = Math.ceil((clo - toff) / 9); n * 9 + toff <= chi; n++) {
+          const sl = n * 9 + toff; if (stAt(sl) !== 'city' || nearBoundary(sl, 6) || scenery.openAt(sl)) continue;
+          const sd = n * 17 + g.id * 7 + sg * 11; if (hash(sd) < 0.25) continue;
+          const kd = CLUTTER[Math.floor(hash(sd + 1) * CLUTTER.length)]; const pool = clutterPools[kd];
+          if (clutterUse[kd] >= pool.length) continue;
+          const it = pool[clutterUse[kd]++]; at(g, sl, sg * (HW + SW - 0.9));
+          it.g.visible = true; it.g.position.set(P.x, 0.2 + g.y, P.z); it.g.rotation.set(0, g.yaw + hash(sd + 2) * 6, 0);
+          if (it.fire) flicker(it.fire, s.time, sd);
         }
         // interior props along the walls (desks/lockers/barriers or beds/gurneys/bays)
         const poff = sg > 0 ? 4.5 : 0;
@@ -593,7 +823,9 @@ function createEngine(gl: ExpoWebGLRenderingContext, w: number, h: number) {
         for (let n = Math.ceil(la / 8); n * 8 <= lb && cl < ceilLights.length; n++) {
           if (stAt(n * 8) === 'city' || nearBoundary(n * 8, 2)) continue;
           const m = ceilLights[cl++]; at(g, n * 8, 0);
-          m.visible = true; m.position.set(P.x, 6.36 + g.y * 4, P.z); m.rotation.set(0, g.yaw, 0);
+          // a few failing tubes stutter in the hospital and precinct
+          m.visible = !(hash(n * 7 + 3) > 0.8 && Math.sin(s.time * (19 + (n % 4) * 3) + n) > 0.15);
+          m.position.set(P.x, 6.36 + g.y * 4, P.z); m.rotation.set(0, g.yaw, 0);
         }
       }
     }
@@ -601,6 +833,7 @@ function createEngine(gl: ExpoWebGLRenderingContext, w: number, h: number) {
     for (let i = bi2; i < blds.length; i++) blds[i].g.visible = false;
     for (let i = li; i < lamps.length; i++) lamps[i].g.visible = false;
     for (let i = ci2; i < cars.length; i++) cars[i].g.visible = false;
+    for (const kd in clutterPools) { const pool = clutterPools[kd as ClutterKind]; for (let i = clutterUse[kd as ClutterKind]; i < pool.length; i++) pool[i].g.visible = false; }
     for (let i = cl; i < ceilLights.length; i++) ceilLights[i].visible = false;
     for (let i = sb; i < strobes.length; i++) strobes[i].visible = false;
     for (const k of ['alley', 'collapsed'] as const) { const pool = routePools[k]; for (let i = routeUse[k]; i < pool.length; i++) pool[i].visible = false; }
@@ -633,6 +866,16 @@ function createEngine(gl: ExpoWebGLRenderingContext, w: number, h: number) {
       cm.visible = true; cm.position.set((hash(sd) - 0.5) * LW * 2.6, 0.012, -(sl - d));
       cm.rotation.set(-Math.PI / 2, 0, hash(sd + 3) * 3); cm.scale.set(0.4 + hash(sd + 1) * 1.2, 0.15 + hash(sd + 2) * 0.6, 1);
     }
+    // lane dashes on the current city street
+    {
+      const dA = Math.max(d - 6, L ? L.s + HW : -Infinity); const dB = Math.min(d + 60, J.s - HW - 2); let di = 0;
+      for (let sl = Math.ceil(dA / 8) * 8; sl <= dB && di < dashes.length - 1; sl += 8) {
+        if (stAt(sl) !== 'city') continue;
+        for (const x of [-LW / 2, LW / 2]) { const m = dashes[di++]; m.visible = true; m.position.set(x, 0.011, -(sl - d)); }
+      }
+      for (let i = di; i < dashes.length; i++) dashes[i].visible = false;
+    }
+    const airDt = stepAir(s, curSt);
     // junction props
     const jset: [Seg, number, number, boolean][] = [];
     if (J.s - d < VIS + 10) jset.push([cur, J.s, J.dir, !!J.branch]);
@@ -694,6 +937,18 @@ function createEngine(gl: ExpoWebGLRenderingContext, w: number, h: number) {
     animateSurvivor(surv, s);
     survShadow.position.x = sx; survShadow.visible = !fallen;
     survShadow.scale.setScalar(1 - Math.min(0.6, s.jy / 4));
+    if (s.mode === 'run') {
+      if (prevJy > 0.05 && s.jy <= 0.001) puff(d, sx, curSt);
+      if (prevSlide <= 0 && s.slideT > 0 && s.jy < 0.05) puff(d, sx, curSt);
+    }
+    prevJy = s.jy; prevSlide = s.slideT;
+    for (const dp of dusts) {
+      dp.age += airDt; const life = 0.5;
+      dp.m.visible = dp.age < life; if (!dp.m.visible) continue;
+      const f = dp.age / life; dp.m.scale.setScalar(0.5 + f * 2.2);
+      dp.m.position.set(dp.x, 0.05, -(dp.at - d) + f * 0.6);
+      (dp.m.material as THREE.MeshBasicMaterial).opacity = 0.38 * (1 - f) * (1 - f);
+    }
     const alive = s.mode === 'run' || s.mode === 'paused';
     bubble.visible = alive && s.shieldT > 0 && (s.shieldT > 2 || Math.sin(s.time * 20) > 0);
     if (bubble.visible) { bubble.position.set(sx, Math.max(0, s.jy) + 0.95, 0); bubble.rotation.y = s.time * 0.8; bubbleM.opacity = 0.14 + 0.06 * Math.sin(s.time * 5); }
@@ -742,14 +997,17 @@ function createEngine(gl: ExpoWebGLRenderingContext, w: number, h: number) {
       slot.used = true;
       const g = segOf(wk.s); at(g, wk.s, wk.lane * LW);
       const caught = dying && s.deathCause === 'walker' && Math.abs(z) < 1.5;
-      // brutes are 1.8x tall and wide, spanning the two lanes they block
-      const size = wk.type === 'brute' ? 1.8 : 1;
+      // brutes stand ~2.6 m tall and span the two lanes they block
+      const wt = (wk.type ?? 'walker') as WalkerType; applyLook(slot, wt);
+      const size = wt === 'brute' ? 1.5 : wt === 'crawler' ? 1.3 : 1;
       slot.r.root.visible = true; slot.r.root.position.set(P.x, g.y, P.z); slot.r.root.rotation.y = g.yaw + Math.PI;
       slot.r.root.scale.setScalar(size);
       if (caught) animateZombie(slot.r, slot.gait, s.time * (4 + wk.v * 0.6) + wk.id, lunge);
-      else if (wk.type === 'crawler') animateZombieCrawl(slot.r, slot.gait, s.time * 5 + wk.id);
-      else if (wk.type === 'brute') animateZombie(slot.r, slot.gait, s.time * 3.2 + wk.id, 0.6);
-      else animateZombieCharge(slot.r, slot.gait, s.time * (wk.type === 'sprinter' ? 14 : 7 + wk.v) + wk.id);
+      else if (wt === 'crawler') animateZombieCrawl(slot.r, slot.gait, s.time * 5 + wk.id);
+      else if (wt === 'brute') animateZombieBrute(slot.r, slot.gait, s.time * 3.4 + wk.id);
+      else if (wt === 'sprinter') animateZombieSprint(slot.r, slot.gait, s.time * 15 + wk.id);
+      else animateZombieCharge(slot.r, slot.gait, s.time * (7 + wk.v) + wk.id);
+      if (slot.eyes.visible) eyeGlowM.opacity = 0.28 + 0.12 * Math.sin(s.time * 9);
       slot.sh.visible = true; slot.sh.position.set(P.x, 0.02 + g.y, P.z); slot.sh.scale.setScalar(size);
     }
     for (const pool of walkerPools) for (const w of pool) if (!w.used) { w.r.root.visible = false; w.sh.visible = false; }
@@ -795,7 +1053,7 @@ function createEngine(gl: ExpoWebGLRenderingContext, w: number, h: number) {
   resize(W, H);
 
   const dispose = () => {
-    endIntro(); endMissionCutscene(); scenery.dispose();
+    endIntro(); endMissionCutscene(); scenery.dispose(); dotTex.dispose();
     for (const g of geos) g.dispose();
     for (const m of mats) m.dispose();
     renderer.dispose();
@@ -873,7 +1131,7 @@ export function RunnerScene({ width, height, onReady }: Props) {
       </View>
     );
   }
-  return <GLView key={attempt} msaaSamples={0} style={StyleSheet.absoluteFill} onContextCreate={onContextCreate} />;
+  return <GLView key={attempt} msaaSamples={4} style={StyleSheet.absoluteFill} onContextCreate={onContextCreate} />;
 }
 
 const styles = StyleSheet.create({

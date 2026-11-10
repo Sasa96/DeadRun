@@ -89,6 +89,8 @@ export default function Game() {
   const isWeb = Platform.OS === 'web';
 
   const simRef = useRef<Sim>(newSim('home'));
+  // dev-only (web): expose the live sim for visual debugging in the browser console
+  if (__DEV__ && Platform.OS === 'web') (globalThis as { __dr?: typeof simRef }).__dr = simRef;
   const missionRef = useRef<number | null>(null);
   const freshSim = (m: Mode) => (m === 'run' && missionRef.current ? newMissionSim(missionRef.current) : newSim(m));
   type Menu = 'home' | 'chooser' | 'campaign';

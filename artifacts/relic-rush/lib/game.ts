@@ -505,7 +505,8 @@ export function step(s: Sim, dt: number): { coin: boolean; died: boolean; turned
   s.cleanTime += dt;
   s.speed = nextSpeed(s.speed, s.dist, dt, simDifficulty(s).speedCap);
   s.dist += s.speed * dt * (s.stumbleT > 0 ? 0.65 : 1);
-  s.phase += dt * (6 + s.speed * 0.45);
+  // one stride (two steps) per 2π: real sprint cadence tops out near 4.6 steps/s
+  s.phase += dt * Math.min(14.5, 7.5 + s.speed * 0.22);
   s.px += (s.lane - s.px) * Math.min(1, dt * 14);
   // Clean running earns space; repeated mistakes before recovery let the horde catch up.
   if (s.stumbleT <= 0) s.horde = Math.min(HORDE_REST + (s.distractionT > 0 ? 3 : 0), s.horde + dt * (s.distractionT > 0 ? 1.8 : simDifficulty(s).hordeRegen));

@@ -110,7 +110,7 @@ function cloth(g: THREE.BufferGeometry, folds: number, hemY: number | null, tatt
 }
 
 // ---------- humanoid spec ----------
-type HairStyle = 'beanie' | 'short' | 'bald' | 'combover' | 'long' | 'hood' | 'hardhat' | 'policecap' | 'scrubcap';
+type HairStyle = 'beanie' | 'short' | 'bald' | 'combover' | 'long' | 'hood' | 'hardhat' | 'policecap' | 'scrubcap' | 'helmet' | 'gasmask' | 'cap';
 interface Spec {
   skin: Paint; top: Paint; bottom: Paint; shoe: Paint; hair: Paint; hand?: Paint;
   sleeves: [boolean, boolean]; // forearm covered L/R
@@ -205,6 +205,31 @@ function addHead(b: Builder, s: Spec) {
     case 'scrubcap': {
       b.add(new THREE.SphereGeometry(0.114, 16, 8, 0, Math.PI * 2, 0, 1.55), { c: hairP.c, noise: 0.05, ao: 0.15 }, M(0, 0.116, 0.01, -0.15, 0, 0, 0.93, 1.1, 1.05));
       b.add(ring(0.1, 0.012, 18), { c: hairP.c, noise: 0.06 }, M(0, 0.112, 0.008, Math.PI / 2 - 0.15, 0, 0, 0.94, 1.06, 1));
+      break;
+    }
+    case 'helmet': case 'gasmask': {
+      // combat helmet: rounded shell with a fabric cover, rim, chin strap, goggles band on the back
+      b.add(new THREE.SphereGeometry(0.128, 16, 8, 0, Math.PI * 2, 0, 1.55), { c: '#4E5636', noise: 0.12, blotch: '#363A24', blotchAmt: 0.7, ao: 0.25 }, M(0, 0.14, 0.008, -0.08, 0, 0, 0.95, 0.95, 1.05));
+      b.add(ring(0.122, 0.012, 18), { c: '#3A4028', noise: 0.08 }, M(0, 0.135, 0.008, Math.PI / 2 - 0.08, 0, 0, 0.95, 1.05, 1));
+      for (const sx of [-1, 1]) b.add(blob(0.006, 0.06, 0.008), { c: '#2A2A20', noise: 0 }, M(sx * 0.085, 0.07, -0.02, 0.2));
+      b.add(blob(0.11, 0.014, 0.03, 3), { c: '#22231C', noise: 0.04 }, M(0, 0.17, 0.09, 0.4));
+      if (s.hairStyle === 'gasmask') {
+        // full-face respirator: rubber face seal, twin glass eyepieces, snout with a filter canister
+        b.add(blob(0.082, 0.085, 0.05, 2.4), { c: '#26272A', noise: 0.06, ao: 0.3 }, M(0, 0.085, -0.075));
+        for (const sx of [-1, 1]) {
+          b.add(new THREE.CylinderGeometry(0.022, 0.022, 0.012, 12), { c: '#1A1C1E', noise: 0 }, M(sx * 0.035, 0.118, -0.118, Math.PI / 2));
+          b.add(new THREE.CylinderGeometry(0.017, 0.017, 0.014, 12), { c: '#6E8A80', noise: 0 }, M(sx * 0.035, 0.118, -0.122, Math.PI / 2));
+        }
+        b.add(new THREE.CylinderGeometry(0.03, 0.026, 0.05, 10), { c: '#34363A', noise: 0.05 }, M(0, 0.05, -0.13, Math.PI / 2 - 0.4));
+        b.add(new THREE.CylinderGeometry(0.036, 0.036, 0.045, 12), { c: '#5A5C50', noise: 0.08 }, M(0.035, 0.035, -0.15, Math.PI / 2 - 0.4, 0, -0.5));
+        for (const sx of [-1, 1]) b.add(blob(0.008, 0.008, 0.07), { c: '#1E1F22', noise: 0 }, M(sx * 0.07, 0.11, -0.02, 0, sx * 0.3));
+      }
+      break;
+    }
+    case 'cap': {
+      // peaked work cap (transit / trucker)
+      b.add(new THREE.SphereGeometry(0.112, 14, 7, 0, Math.PI * 2, 0, 1.35), { c: hairP.c, noise: 0.06, ao: 0.2 }, M(0, 0.12, 0.01, -0.15, 0, 0, 0.92, 1.05, 1.04));
+      b.add(blob(0.085, 0.008, 0.06, 2.6), { c: hairP.c, noise: 0.05 }, M(0, 0.15, -0.105, -0.3));
       break;
     }
     case 'bald': break;
@@ -366,6 +391,21 @@ export function buildSurvivor(mat: THREE.Material, outfit: OutfitLook = 'scout')
 export interface ZombieGait { drag: 0 | 1; reachL: number; reachR: number; rate: number; tilt: number; hunch: number }
 
 const BRUISE = '#5E4D63'; const VEIN = '#53624E'; const GRIME = '#3A3530';
+/** soldier load-out: plate carrier with mag pouches, shoulder straps, belt kit, knee pads, radio */
+function soldierKit(b: Record<BoneName, Builder>, torn: boolean) {
+  const vest = { c: '#3E4230', noise: 0.08, ao: 0.3, dirt: GRIME, dirtAmt: 0.4 };
+  b.torso.add(cloth(lathe([[0.148, 0.12], [0.168, 0.24], [0.176, 0.38], [0.158, 0.46]], 14), 0.02, 0.1, torn ? 0.06 : 0.02, 23), vest, M(0, 0, 0, 0, 0, 0, 1.3, 1, 0.84));
+  for (let i = -1; i <= 1; i++) b.torso.add(blob(0.034, 0.05, 0.026, 3), { c: '#4A4E38', noise: 0.08 }, M(i * 0.07, 0.24, -0.15));
+  b.torso.add(blob(0.05, 0.03, 0.02, 3), { c: '#34382A', noise: 0.06 }, M(0.07, 0.36, -0.148));
+  b.torso.add(blob(0.02, 0.05, 0.02, 3), { c: '#1E2024', noise: 0.04 }, M(-0.11, 0.4, -0.13, 0, 0, 0.2));
+  for (const sx of [-1, 1]) b.torso.add(blob(0.03, 0.012, 0.13, 3), vest, M(sx * 0.12, 0.47, 0.0, -0.2));
+  b.torso.add(blob(0.1, 0.12, 0.04, 3), vest, M(0, 0.32, 0.15));
+  b.hips.add(ring(0.152, 0.02, 16), { c: '#2E3024', noise: 0.05 }, M(0, 0.06, 0, Math.PI / 2, 0, 0, 1.15, 0.8, 1));
+  for (const sx of [-1, 1]) b.hips.add(blob(0.04, 0.045, 0.03, 3), { c: '#3E4230', noise: 0.06 }, M(sx * 0.13, 0.02, -0.08, 0, sx * 0.5));
+  b.shinL.add(blob(0.05, 0.05, 0.02, 3), { c: '#2A2C24', noise: 0.05 }, M(0, 0.0, -0.05));
+  b.shinR.add(blob(0.05, 0.05, 0.02, 3), { c: '#2A2C24', noise: 0.05 }, M(0, 0.0, -0.05));
+  if (torn) b.torso.add(blob(0.06, 0.08, 0.012, 2.4), STAIN, M(-0.04, 0.3, -0.17));
+}
 const ZOMBIES: { spec: Omit<Spec, 'eyeWhite' | 'iris' | 'lip' | 'sunken'>; gait: ZombieGait }[] = [
   { // office worker: torn shirt, loose tie, combover
     spec: {
@@ -472,6 +512,78 @@ const ZOMBIES: { spec: Omit<Spec, 'eyeWhite' | 'iris' | 'lip' | 'sunken'>; gait:
         b.torso.add(blob(0.04, 0.035, 0.008, 3), { c: '#3E8288' }, M(-0.08, 0.2, -0.12));
       },
     }, gait: { drag: 1, reachL: 1.2, reachR: 1.5, rate: 1.05, tilt: -0.3, hunch: 0.4 },
+  },
+  { // 9 commuter: long grey overcoat, scarf, short hair
+    spec: {
+      skin: { c: '#9EA48E', blotch: VEIN, blotchAmt: 0.55, noise: 0.07 }, top: { c: '#5E5C5A', noise: 0.06, dirt: GRIME, dirtAmt: 0.5 },
+      bottom: { c: '#2E3038', noise: 0.05 }, shoe: { c: '#1E1A18' }, hair: { c: '#2A2420', noise: 0.08 },
+      sleeves: [true, true], shoulders: 1.0, folds: 0.05, tatter: 0.06, seed: 103, slack: true, hairStyle: 'short',
+      extras: (b) => {
+        b.hips.add(cloth(lathe([[0.16, -0.5], [0.165, -0.3], [0.155, -0.05], [0.145, 0.08]], 14), 0.05, -0.45, 0.07, 13), { c: '#5E5C5A', dirt: GRIME, dirtAmt: 0.5 }, M(0, 0, 0, 0, 0, 0, 1.22, 1, 0.9));
+        b.torso.add(ring(0.07, 0.026, 14), { c: '#7A2E30', noise: 0.08 }, M(0, 0.52, -0.01, Math.PI / 2 - 0.2, 0, 0, 1.1, 0.9, 1));
+        b.torso.add(blob(0.025, 0.12, 0.01, 2.4), { c: '#7A2E30', noise: 0.08 }, M(0.05, 0.38, -0.12, 0, 0, 0.15));
+        for (let i = 0; i < 3; i++) b.torso.add(blob(0.009, 0.009, 0.006), { c: '#1A1816', noise: 0 }, M(-0.03, 0.4 - i * 0.1, -0.126));
+      },
+    }, gait: { drag: 1, reachL: 1.3, reachR: 0.8, rate: 0.95, tilt: 0.25, hunch: 0.35 },
+  },
+  { // 10 transit worker: navy overalls with reflective bands, work cap
+    spec: {
+      skin: { c: '#A49A84', blotch: BRUISE, blotchAmt: 0.5, noise: 0.07 }, top: { c: '#25335A', noise: 0.06, dirt: GRIME, dirtAmt: 0.5 },
+      bottom: { c: '#25335A', noise: 0.06, dirt: GRIME, dirtAmt: 0.5 }, shoe: { c: '#2A2420' }, hair: { c: '#1E2A48', noise: 0.05 },
+      sleeves: [true, true], shoulders: 1.06, folds: 0.03, tatter: 0.04, seed: 109, slack: false, hairStyle: 'cap',
+      extras: (b) => {
+        b.torso.add(lathe([[0.166, 0.26], [0.17, 0.3]], 14), { c: '#D8D4C0', noise: 0 }, M(0, 0, 0, 0, 0, 0, 1.24, 1, 0.78));
+        b.shinL.add(ring(0.058, 0.01, 12), { c: '#D8D4C0', noise: 0 }, M(0, -0.18, 0, Math.PI / 2));
+        b.shinR.add(ring(0.058, 0.01, 12), { c: '#D8D4C0', noise: 0 }, M(0, -0.18, 0, Math.PI / 2));
+        b.torso.add(blob(0.05, 0.04, 0.008, 3), { c: '#E07A2A', noise: 0 }, M(-0.07, 0.4, -0.12));
+      },
+    }, gait: { drag: 0, reachL: 0.9, reachR: 1.5, rate: 0.95, tilt: -0.3, hunch: 0.35 },
+  },
+  { // 11 trucker: checked red shirt, jeans, peaked cap
+    spec: {
+      skin: { c: '#A2A28A', blotch: VEIN, blotchAmt: 0.55, noise: 0.07 }, top: { c: '#8A2A26', blotch: '#3A1A1A', blotchAmt: 0.6, noise: 0.12 },
+      bottom: { c: '#3C4C6A', noise: 0.06, dirt: GRIME, dirtAmt: 0.4 }, shoe: { c: '#4A3A2E' }, hair: { c: '#B8402E', noise: 0.06 },
+      sleeves: [false, true], shoulders: 1.12, folds: 0.04, tatter: 0.06, seed: 113, slack: true, hairStyle: 'cap',
+      extras: (b) => { b.hips.add(ring(0.148, 0.016, 16), { c: '#4A3420', noise: 0.05 }, M(0, 0.06, 0, Math.PI / 2, 0, 0, 1.15, 0.8, 1)); b.hips.add(blob(0.03, 0.022, 0.01, 3), { c: '#B8A060', noise: 0 }, M(0, 0.06, -0.12)); },
+    }, gait: { drag: 1, reachL: 1.5, reachR: 1.1, rate: 0.9, tilt: 0.3, hunch: 0.45 },
+  },
+  { // 12 dock worker: orange hi-vis vest over a dark hoodie, yellow hard hat
+    spec: {
+      skin: { c: C.zSkinB, blotch: VEIN, blotchAmt: 0.55, noise: 0.07 }, top: { c: '#2E3236', noise: 0.06, dirt: GRIME, dirtAmt: 0.4 },
+      bottom: { c: '#3A3E44', noise: 0.06, dirt: GRIME, dirtAmt: 0.5 }, shoe: { c: '#5A4632' }, hair: { c: '#2A2420' },
+      sleeves: [true, true], shoulders: 1.12, folds: 0.03, tatter: 0.05, seed: 127, slack: false, hairStyle: 'hardhat',
+      extras: (b) => {
+        b.torso.add(cloth(lathe([[0.145, 0.06], [0.164, 0.22], [0.172, 0.38], [0.152, 0.47]], 14), 0.03, 0.08, 0.05, 17), { c: '#E2701E', dirt: GRIME, dirtAmt: 0.35 }, M(0, 0, 0, 0, 0, 0, 1.28, 1, 0.79));
+        for (const y of [0.2, 0.32]) b.torso.add(lathe([[0.171, y], [0.174, y + 0.03]], 14), { c: '#DCDCD0', noise: 0 }, M(0, 0, 0, 0, 0, 0, 1.29, 1, 0.8));
+      },
+    }, gait: { drag: 0, reachL: 1.4, reachR: 0.7, rate: 0.95, tilt: -0.2, hunch: 0.4 },
+  },
+  { // 13 dock worker: yellow hi-vis vest, beanie, rolled sleeves
+    spec: {
+      skin: { c: '#9C9A86', blotch: BRUISE, blotchAmt: 0.6, noise: 0.07 }, top: { c: '#4A4440', noise: 0.06, dirt: GRIME, dirtAmt: 0.45 },
+      bottom: { c: '#2E3440', noise: 0.06, dirt: GRIME, dirtAmt: 0.5 }, shoe: { c: '#3A2E26' }, hair: { c: '#3A3028' },
+      sleeves: [false, false], shoulders: 1.05, folds: 0.04, tatter: 0.06, seed: 131, slack: true, hairStyle: 'beanie',
+      extras: (b) => {
+        b.torso.add(cloth(lathe([[0.145, 0.06], [0.164, 0.22], [0.172, 0.38], [0.152, 0.47]], 14), 0.03, 0.08, 0.06, 19), { c: '#C8C82A', dirt: GRIME, dirtAmt: 0.35 }, M(0, 0, 0, 0, 0, 0, 1.28, 1, 0.79));
+        b.torso.add(lathe([[0.171, 0.26], [0.174, 0.29]], 14), { c: '#DCDCD0', noise: 0 }, M(0, 0, 0, 0, 0, 0, 1.29, 1, 0.8));
+      },
+    }, gait: { drag: 1, reachL: 1.2, reachR: 1.4, rate: 1.05, tilt: 0.2, hunch: 0.35 },
+  },
+  { // 14 soldier: camo fatigues, plate carrier with pouches, combat helmet, boots
+    spec: {
+      skin: { c: '#98A08A', blotch: VEIN, blotchAmt: 0.6, noise: 0.07 }, top: { c: '#5A6040', blotch: '#33362A', blotchAmt: 0.85, noise: 0.14, dirt: GRIME, dirtAmt: 0.3 },
+      bottom: { c: '#5A6040', blotch: '#3E3A2A', blotchAmt: 0.85, noise: 0.14, dirt: GRIME, dirtAmt: 0.4 }, shoe: { c: '#2A2620' }, hair: { c: '#2A2420' },
+      sleeves: [true, true], shoulders: 1.1, folds: 0.03, tatter: 0.05, seed: 137, slack: false, hairStyle: 'helmet',
+      extras: (b) => soldierKit(b, false),
+    }, gait: { drag: 0, reachL: 1.5, reachR: 1.35, rate: 1.0, tilt: -0.2, hunch: 0.3 },
+  },
+  { // 15 soldier: torn fatigues, gas mask, plate carrier, blood-soaked
+    spec: {
+      skin: { c: '#8E9682', blotch: BRUISE, blotchAmt: 0.65, noise: 0.07 }, top: { c: '#55593C', blotch: '#2E3024', blotchAmt: 0.85, noise: 0.14, dirt: '#4A1E1E', dirtAmt: 0.45 },
+      bottom: { c: '#55593C', blotch: '#3A3628', blotchAmt: 0.85, noise: 0.14, dirt: GRIME, dirtAmt: 0.45 }, shoe: { c: '#24201C' }, hair: { c: '#2A2420' },
+      sleeves: [true, false], shoulders: 1.08, folds: 0.04, tatter: 0.08, seed: 149, slack: true, hairStyle: 'gasmask',
+      extras: (b) => soldierKit(b, true),
+    }, gait: { drag: 1, reachL: 1.3, reachR: 1.55, rate: 0.95, tilt: 0.3, hunch: 0.4 },
   },
 ];
 export const ZOMBIE_KINDS = ZOMBIES.length;

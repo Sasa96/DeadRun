@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { newSim, advance, requestTurn, stageAt, stageInfo, STAGE_LEN, setLane, canRevive, revive, REVIVE_CLEAR, newMissionSim, specialTypes, specialChance, lastStandTypes, lastStandChance } from '../lib/game.ts';
+import { newSim, advance, requestTurn, stageAt, stageInfo, stageLoop, sewerAt, STAGE_LEN, setLane, canRevive, revive, REVIVE_CLEAR, newMissionSim, specialTypes, specialChance, lastStandTypes, lastStandChance } from '../lib/game.ts';
 import { lastStandUnlocked, LAST_STAND_UNLOCK } from '../lib/campaign.ts';
 import { simDifficulty as simDifficultyOf } from '../lib/game.ts';
 import { newIntro, stepIntro, skipIntro, introShot, INTRO_LEN } from '../lib/intro.ts';
@@ -68,14 +68,17 @@ test('pause freezes distance, turn transition, and approaching zombies', () => {
   assert.equal(s.turnFx, 0.2);
   assert.equal(s.walkers[0].s, 8);
 });
-test('police and hospital stages last the whole segment and cycle', () => {
-  assert.equal(stageAt(0), 'city');
-  assert.equal(stageAt(STAGE_LEN), 'police');
-  assert.equal(stageAt(STAGE_LEN * 2 - 1), 'police');
-  assert.equal(stageAt(STAGE_LEN * 2), 'hospital');
-  assert.equal(stageAt(STAGE_LEN * 3 - 1), 'hospital');
-  assert.equal(stageAt(STAGE_LEN * 3), 'city');
+test('Last Stand runs seven 1 km themes in order, then loops into night', () => {
+  assert.equal(STAGE_LEN, 1000);
+  const order = ['city', 'police', 'hospital', 'subway', 'bridge', 'docks', 'military'];
+  order.forEach((st, i) => { assert.equal(stageAt(i * STAGE_LEN), st); assert.equal(stageAt((i + 1) * STAGE_LEN - 1), st); });
+  assert.equal(stageAt(STAGE_LEN * 7), 'city');
   assert.equal(stageInfo(STAGE_LEN).remaining, STAGE_LEN);
+  assert.equal(stageInfo(6500).next, 'city');
+  assert.equal(stageLoop(6999), 0); assert.equal(stageLoop(7000), 1); assert.equal(stageLoop(14000), 2);
+  // the sewers are the second half of each subway kilometre
+  assert.equal(sewerAt(3499), false); assert.equal(sewerAt(3500), true); assert.equal(sewerAt(3999), true); assert.equal(sewerAt(4000), false);
+  assert.equal(sewerAt(10600), true);
 });
 test('incoming zombies move straight and collision uses real lateral position', () => {
   const s = clearRun();
@@ -174,12 +177,14 @@ import { obstaclePoolIndex, obstacleVisual } from '../lib/game.ts';
 test('obstacle theme follows absolute obstacle distance, not runner stage; collision unchanged', () => {
   const at = (s, type, id = 2) => obstaclePoolIndex(s, id, type);
   assert.deepEqual([at(10, 'gap'), at(10, 'hurdle'), at(10, 'beam')], [0, 1, 2]);
-  assert.deepEqual([at(899.9, 'hurdle'), at(900, 'hurdle'), at(900, 'hurdle', 3), at(901, 'beam'), at(901, 'gap')], [1, 4, 5, 6, 3]);
-  assert.deepEqual([at(1800, 'gap'), at(1800, 'hurdle'), at(1800, 'hurdle', 1), at(1800, 'beam')], [7, 8, 9, 10]);
-  assert.equal(at(2700, 'beam'), 2);
-  assert.equal(obstacleVisual(1799, 4, 'hurdle').stage, 'police');
+  assert.deepEqual([at(999.9, 'hurdle'), at(1000, 'hurdle'), at(1000, 'hurdle', 3), at(1001, 'beam'), at(1001, 'gap')], [1, 4, 5, 6, 3]);
+  assert.deepEqual([at(2000, 'gap'), at(2000, 'hurdle'), at(2000, 'hurdle', 1), at(2000, 'beam')], [7, 8, 9, 10]);
+  // new Last Stand themes: subway 11-14, bridge 15-18, docks 19-22, military 23-26, then back to the city
+  assert.deepEqual([at(3000, 'gap'), at(4000, 'gap'), at(5000, 'gap'), at(6000, 'gap'), at(6999, 'beam')], [11, 15, 19, 23, 26]);
+  assert.equal(at(7000, 'beam'), 2);
+  assert.equal(obstacleVisual(1999, 4, 'hurdle').stage, 'police');
   // same obstacle hit in the same way regardless of where the runner/stage is
-  for (const base of [100, 1000, 1900]) for (const type of ['hurdle', 'beam']) {
+  for (const base of [100, 1100, 2100, 3100, 4100, 5100, 6100]) for (const type of ['hurdle', 'beam']) {
     const s = newSim('run'); s.turn = { id: 9, s: 1e6, dir: 1 }; s.nextS = 1e9; s.dist = base; s.speed = 12;
     s.horde = 1;
     s.obstacles = [{ id: 50, s: base + 3, lane: 0, type }];
@@ -468,4 +473,26 @@ test('Last Stand best is tracked separately; campaign runs only count toward tro
   // old saves without the field load with a clean Last Stand record
   assert.equal(normalizeProgress({ best: 3000 }).lastStandBest, 0);
   assert.equal(normalizeProgress({ lastStandBest: 1234 }).lastStandBest, 1234);
+});
+
+test('rat swarms run only in Last Stand sewers, in one lane, and are cleared by a jump', () => {
+  const seen = { sewer: 0, elsewhere: 0 };
+  for (let n = 0; n < 6; n++) {
+    const s = newSim('run'); s.dist = 3300; s.speed = 26; s.nextS = 3320; s.turn = { id: 9, s: 1e6, dir: 1 };
+    for (let i = 0; i < 1500 && s.mode === 'run' && s.dist < 4100; i++) {
+      s.horde = 99; s.invulnerableT = 1; s.obstacles = s.obstacles.filter((o) => o.type !== 'gap'); advance(s, 1 / 30);
+      const rats = s.walkers.filter((w) => w.type === 'rat');
+      for (const r of rats) { if (sewerAt(r.s)) seen.sewer++; else if (r.s < 3450) seen.elsewhere++; }
+      // a pack never spans lanes: every rat sits within a quarter lane of its pack
+      if (rats.length) assert(Math.max(...rats.map((r) => r.lane)) - Math.min(...rats.map((r) => r.lane)) < 2.3);
+    }
+  }
+  assert(seen.sewer > 0, 'rats appear in the sewers');
+  assert.equal(seen.elsewhere, 0, 'no rats before the sewers');
+  // missions never spawn rats
+  const m = newMissionSim(10);
+  for (let i = 0; i < 2500 && m.mode === 'run'; i++) { m.horde = 99; m.invulnerableT = 1; m.obstacles = m.obstacles.filter((o) => o.type !== 'gap'); requestTurn(m, m.turn.dir); advance(m, 1 / 30); assert(m.walkers.every((w) => w.type !== 'rat')); }
+  const rat = () => { const s = clearRun(); s.horde = 1; s.walkers = [{ id: 1, s: 0.2, lane: 0, v: 7, kind: 0, type: 'rat' }]; return s; };
+  const hit = rat(); advance(hit, 0.02); assert.equal(hit.deathWalker, 'rat');
+  const hop = rat(); hop.jy = 0.8; hop.vy = 3; advance(hop, 0.02); assert.equal(hop.mode, 'run');
 });

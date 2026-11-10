@@ -4,7 +4,8 @@ import { GLView, type ExpoWebGLRenderingContext } from 'expo-gl';
 import * as THREE from 'three';
 import { Feather } from '@expo/vector-icons';
 import colors, { scene as C } from '@/constants/colors';
-import { GAP_LEN, OB_POOL_CAP, STAGE_KINDS, STAGE_LEN, routeInfo, simObstaclePoolIndex, simStageAt, stageAt, type Sim, type StageId, type WalkerType } from '@/lib/game';
+import { GAP_LEN, INDOOR, OB_POOL_CAP, STAGES, STAGE_KINDS, STAGE_LEN, routeInfo, sewerAt, simObstaclePoolIndex, simStageAt, stageAt, stageLoop, type Sim, type StageId, type WalkerType } from '@/lib/game';
+import { animateRat, buildRat, buildThemes, NEW_STAGES, NEW_STAGE_COLORS, SEWER_COLORS, type NewStage } from '@/components/lastStandThemes';
 import { textGeo } from '@/components/pixelText';
 import { buildThemedObstacles } from '@/components/themedObstacles';
 import { createIntro, type Intro } from '@/components/IntroCinematic';
@@ -143,8 +144,16 @@ function createEngine(gl: ExpoWebGLRenderingContext, w: number, h: number) {
     city: { road: roadMat, walk: walkMat, curb: curbMat, wall: null, band: null, ceil: null },
     police: { road: regM(lam('#56637A')), walk: regM(lam('#6C788C')), curb: regM(lam('#C9CED6')), wall: regM(lam('#25334F')), band: regM(basic('#3E74D8')), ceil: regM(lam('#2C384E')) },
     hospital: { road: regM(lam('#B6C8C0')), walk: regM(lam('#D0DAD3')), curb: regM(lam('#3C9894')), wall: regM(lam('#E0E5DC')), band: regM(lam('#3C9894')), ceil: regM(lam('#C4CDC6')) },
+    ...Object.fromEntries(NEW_STAGES.map((st) => { const c = NEW_STAGE_COLORS[st]; return [st, { road: regM(lam(c.road)), walk: regM(lam(c.walk)), curb: regM(lam(c.curb)), wall: c.wall ? regM(lam(c.wall)) : null, band: c.band ? regM(basic(c.band)) : null, ceil: c.ceil ? regM(lam(c.ceil)) : null }]; })) as unknown as Record<NewStage, StageMats>,
   };
-  const FOG: Record<StageId, THREE.Color> = { city: new THREE.Color(C.fog), police: new THREE.Color('#283550'), hospital: new THREE.Color('#BCD0C8') };
+  // sewer half of the subway (Last Stand): wet brick, slime band, dim vault
+  const SEWER: StageMats = { road: SM.subway.road, walk: regM(lam(SEWER_COLORS.walk)), curb: regM(lam('#3A4A40')), wall: regM(lam(SEWER_COLORS.wall)), band: regM(lam(SEWER_COLORS.band)), ceil: regM(lam(SEWER_COLORS.ceil)) };
+  const smAt = (st: StageId, a: number, b: number) => (st === 'subway' && !(curSim && curSim.campaign) && sewerAt((a + b) / 2) ? SEWER : SM[st]);
+  const FOG: Record<StageId, THREE.Color> = {
+    city: new THREE.Color(C.fog), police: new THREE.Color('#283550'), hospital: new THREE.Color('#BCD0C8'),
+    ...Object.fromEntries(NEW_STAGES.map((st) => [st, new THREE.Color(NEW_STAGE_COLORS[st].fog)])) as unknown as Record<NewStage, THREE.Color>,
+  };
+  const NIGHT = new THREE.Color('#3A0E14');
   const fogNow = new THREE.Color(C.fog);
   // generic box pieces for floors, sidewalks, curbs, interior walls and ceilings
   const pieces: THREE.Mesh[] = [];
@@ -180,13 +189,13 @@ function createEngine(gl: ExpoWebGLRenderingContext, w: number, h: number) {
   };
   const embers = mkCloud(90, '#FF9248', 0.13, 0.9, true);
   const ash = mkCloud(150, '#B9B0B6', 0.09, 0.55, false);
-  const ASH_TINT: Record<StageId, [string, number]> = { city: ['#B9B0B6', 0.55], police: ['#9FB0D0', 0.28], hospital: ['#FFFFFF', 0.3] };
+  const ASH_TINT: Record<StageId, [string, number]> = { city: ['#B9B0B6', 0.55], police: ['#9FB0D0', 0.28], hospital: ['#FFFFFF', 0.3], ...Object.fromEntries(NEW_STAGES.map((st) => [st, NEW_STAGE_COLORS[st].ash])) as unknown as Record<NewStage, [string, number]> };
   let airT = -1; let airD = 0;
   const stepAir = (s: Sim, st: StageId) => {
     const dt = airT < 0 ? 0 : Math.max(0, Math.min(0.05, s.time - airT)); airT = s.time;
     const dd = Math.max(0, Math.min(3, s.dist - airD)); airD = s.dist;
     const span = AIR.z1 - AIR.z0;
-    embers.pts.visible = st === 'city';
+    embers.pts.visible = !INDOOR[st];
     if (embers.pts.visible) for (let i = 0; i < embers.n; i++) {
       const j = i * 3; const p = embers.pos;
       p[j + 2] += dd; p[j + 1] += dt * (0.6 + (i % 5) * 0.12); p[j] += Math.sin(s.time * 1.3 + i) * dt * 0.35;
@@ -206,7 +215,7 @@ function createEngine(gl: ExpoWebGLRenderingContext, w: number, h: number) {
 
   // dust kicked up on landing and at the start of a slide
   const dustGeo = reg(new THREE.CircleGeometry(0.5, 14));
-  const DUST_TINT: Record<StageId, string> = { city: '#A0948C', police: '#8C98AC', hospital: '#DCE4DE' };
+  const DUST_TINT: Record<StageId, string> = { city: '#A0948C', police: '#8C98AC', hospital: '#DCE4DE', ...Object.fromEntries(NEW_STAGES.map((st) => [st, NEW_STAGE_COLORS[st].dust])) as unknown as Record<NewStage, string> };
   const dusts = Array.from({ length: 6 }, () => {
     const m = new THREE.Mesh(dustGeo, regM(basic('#A0948C', { transparent: true, opacity: 0, depthWrite: false })));
     m.rotation.x = -Math.PI / 2; m.visible = false; world.add(m); return { m, age: 9, at: 0, x: 0 };
@@ -336,9 +345,11 @@ function createEngine(gl: ExpoWebGLRenderingContext, w: number, h: number) {
   };
   const bagGeo = reg(new THREE.DodecahedronGeometry(0.42, 0)); const barrelGeo = reg(new THREE.CylinderGeometry(0.34, 0.34, 0.95, 10));
   const coneGeo = reg(new THREE.ConeGeometry(0.2, 0.62, 8)); const hydGeo = reg(new THREE.CylinderGeometry(0.14, 0.17, 0.7, 8));
-  type ClutterKind = 'bags' | 'barrel' | 'cones' | 'hydrant' | 'debris';
+  type ClutterKind = 'bags' | 'barrel' | 'cones' | 'hydrant' | 'debris' | 'crates' | 'sandbags';
   const CLUTTER: ClutterKind[] = ['bags', 'bags', 'barrel', 'cones', 'hydrant', 'debris'];
-  const clutterMake: Record<ClutterKind, () => { g: THREE.Group; fire?: Fire }> = {
+  const CLUTTER_BY: Partial<Record<StageId, ClutterKind[]>> = { city: CLUTTER, bridge: ['debris', 'cones', 'bags', 'debris', 'barrel'], docks: ['barrel', 'crates', 'crates', 'barrel', 'bags'], military: ['sandbags', 'crates', 'sandbags', 'barrel', 'debris'] };
+  const eyeRedRat = () => regM(basic('#FF2A1A'));
+  const clutterMake: Record<'bags' | 'barrel' | 'cones' | 'hydrant' | 'debris', () => { g: THREE.Group; fire?: Fire }> = {
     bags: () => { const g = new THREE.Group(); for (let i = 0; i < 4; i++) { const m = new THREE.Mesh(bagGeo, i % 2 ? bagM2 : bagM); m.position.set((hash(i + 1) - 0.5) * 0.9, 0.3 + (i === 3 ? 0.35 : 0), (i - 1.5) * 0.45); m.scale.set(1, 0.8 + hash(i) * 0.3, 1); m.rotation.set(i, i * 1.7, 0); g.add(m); } return { g }; },
     barrel: () => { const g = new THREE.Group(); const b = new THREE.Mesh(barrelGeo, barrelM); b.position.y = 0.48; g.add(b); const fi = makeFire(0.6, false); fi.f.position.y = 0.96; g.add(fi.f); return { g, fire: fi }; },
     cones: () => { const g = new THREE.Group(); for (let i = 0; i < 3; i++) { const c = new THREE.Mesh(coneGeo, coneM); c.position.set(0.3 - i * 0.25, 0.31, (i - 1) * 0.7); if (i === 2) { c.rotation.z = 1.5; c.position.y = 0.2; } g.add(c); const st = new THREE.Mesh(unit, coneStripe); st.scale.set(0.27, 0.07, 0.27); st.position.set(c.position.x, i === 2 ? 0.2 : 0.34, c.position.z); st.visible = i !== 2; g.add(st); } return { g }; },
@@ -416,7 +427,7 @@ function createEngine(gl: ExpoWebGLRenderingContext, w: number, h: number) {
     curtain: () => { const g = new THREE.Group(); mk(g, steel, 0.05, 0.05, 3.0, 0.4, 2.4, 0); for (let i = 0; i < 6; i++) mk(g, curtainM, 0.04, 2.0, 0.5, 0.4 + (i % 2) * 0.06, 1.35, -1.25 + i * 0.5); mk(g, sheet, 0.8, 0.5, 1.8, -0.6, 0.6, 0); return g; },
     cabinet: () => { const g = new THREE.Group(); mk(g, sheet, 0.5, 1.6, 1.4, -0.8, 0.8, 0); mk(g, crossRed, 0.02, 0.36, 0.1, -0.54, 1.25, 0); mk(g, crossRed, 0.02, 0.1, 0.36, -0.54, 1.25, 0); mk(g, steel, 0.02, 0.6, 0.02, -0.54, 0.6, 0.3); return g; },
   };
-  const PROPS: Record<StageId, string[]> = { city: [], police: ['desk', 'lockers', 'barrier', 'bench'], hospital: ['bed', 'gurney', 'curtain', 'cabinet'] };
+  const PROPS: Record<StageId, string[]> = { city: [], police: ['desk', 'lockers', 'barrier', 'bench'], hospital: ['bed', 'gurney', 'curtain', 'cabinet'], subway: [], bridge: [], docks: [], military: [] };
   const propPools: Record<string, THREE.Group[]> = {};
   for (const k of Object.keys(propMakers)) propPools[k] = Array.from({ length: 6 }, () => { const g = propMakers[k](); g.visible = false; world.add(g); return g; });
   const propUse: Record<string, number> = {};
@@ -463,7 +474,7 @@ function createEngine(gl: ExpoWebGLRenderingContext, w: number, h: number) {
     }
     g.visible = false; world.add(g); return g;
   };
-  const portals: Record<StageId, THREE.Group> = { city: portal('city'), police: portal('police'), hospital: portal('hospital') };
+  const portals = { city: portal('city'), police: portal('police'), hospital: portal('hospital') } as Record<StageId, THREE.Group>;
 
   // obstacles
   const concrete = regM(lam(C.concrete)); const hazard = regM(lam(C.hazard)); const hazardDark = regM(lam(C.hazardDark));
@@ -502,7 +513,27 @@ function createEngine(gl: ExpoWebGLRenderingContext, w: number, h: number) {
   });
 
   const themed = buildThemedObstacles({ world, unit, LW, gapLen: GAP_LEN, reg, regM, pitMat, rimMat, city: [gapPool, hurdlePool, beamPool] });
-  const obPools = themed.pools; const obCount = new Int32Array(obPools.length);
+  // Last Stand themes 4-7: subway & sewers, highway bridge, docks, military quarantine zone
+  const themes = buildThemes({ world, LW, gapLen: GAP_LEN, HW, SW, reg, regM });
+  for (const st of NEW_STAGES) portals[st] = themes.portals[st];
+  const obPools = [...themed.pools, ...NEW_STAGES.flatMap((st) => themes.obstacles[st])]; const obCount = new Int32Array(obPools.length);
+  const meshPool = (n: number, geo: THREE.BufferGeometry) => Array.from({ length: n }, () => { const m = new THREE.Mesh(geo, themes.mat); m.visible = false; world.add(m); return m; });
+  const sidePool = meshPool(48, themes.sideGeos.bridge[0]);
+  const landPool = meshPool(6, themes.landmarkGeos.bridge);
+  const trainPool = meshPool(3, themes.trainGeo);
+  const subPropPool = meshPool(16, themes.subwayProps[0]);
+  const truckPool = meshPool(5, themes.armyTruck);
+  const metroSigns = [0, 1, 2, 3].map(() => themes.metroSign());
+  // a dark sea far beneath the bridge deck
+  const water = new THREE.Mesh(reg(new THREE.PlaneGeometry(700, 700)), regM(lam('#1A2630'))); water.rotation.x = -Math.PI / 2; water.position.set(0, -18, -120); water.visible = false; scn.add(water);
+  // crates and sandbag stacks join the sidewalk clutter for the docks / military zone
+  for (const [kd, geo] of [['crates', themes.crates], ['sandbags', themes.sandbags]] as const) {
+    clutterPools[kd] = Array.from({ length: 6 }, () => { const g = new THREE.Group(); g.add(new THREE.Mesh(geo, themes.mat)); g.visible = false; world.add(g); return { g }; });
+    clutterUse[kd] = 0;
+  }
+  // rat swarms (Last Stand sewers)
+  const makeRat = buildRat(reg, themes.mat, eyeRedRat());
+  const ratPool = Array.from({ length: 24 }, () => { const r = makeRat(); world.add(r.g); return r; });
   // supplies
   const caseMat = regM(lam(C.supplyCase)); const glowMat = regM(basic(C.supply));
   const canGeo = reg(new THREE.CylinderGeometry(0.2, 0.2, 0.42, 8)); const capGeo = reg(new THREE.CylinderGeometry(0.21, 0.21, 0.1, 8));
@@ -542,6 +573,7 @@ function createEngine(gl: ExpoWebGLRenderingContext, w: number, h: number) {
     sprinter: regM(new THREE.MeshLambertMaterial({ vertexColors: true, color: '#F0B4A8' })),
     brute: regM(new THREE.MeshLambertMaterial({ vertexColors: true, color: '#A4949E' })),
     crawler: regM(new THREE.MeshLambertMaterial({ vertexColors: true, color: '#E2E8D0', emissive: '#2C3424' })),
+    rat: charMat,
   };
   const eyeRed = regM(basic('#FF2A1A', { transparent: true, opacity: 1, depthWrite: false, blending: THREE.AdditiveBlending }));
   const eyeAmber = regM(basic('#FFAA30', { transparent: true, opacity: 0.8, depthWrite: false, blending: THREE.AdditiveBlending }));
@@ -701,7 +733,8 @@ function createEngine(gl: ExpoWebGLRenderingContext, w: number, h: number) {
     if (prv.on && L && L.branch) Object.assign(alt2, { on: true, id: L.id + 7000, cx: 0, cz: d - L.s, fx: 0, fz: 1, rx: -1, rz: 0, s0: L.s, yaw: Math.PI, from: L.s - HW - SW, to: L.s + 34, sC: L.s, dS: -L.dir, eC: null, dE: 0, dE2: 0, y: 0.006 });
     else alt2.on = false;
 
-    let bi2 = 0; let li = 0; let ci2 = 0; pi = 0; let cl = 0; let sb = 0; const signUse = { police: 0, hospital: 0 };
+    let bi2 = 0; let li = 0; let ci2 = 0; pi = 0; let cl = 0; let sb = 0; const signUse = { police: 0, hospital: 0, subway: 0 };
+    let sdi = 0; let ldi = 0; let tri = 0; let spi = 0; let tki = 0;
     for (const k in propUse) propUse[k] = 0;
     routeUse.alley = 0; routeUse.collapsed = 0;
     for (const kd in clutterUse) clutterUse[kd as ClutterKind] = 0;
@@ -712,12 +745,12 @@ function createEngine(gl: ExpoWebGLRenderingContext, w: number, h: number) {
       ranges(ra, rb, (a, b, st) => piece(SM[st].road, g, a, b, 0, HW * 2, 0.02, -0.01 + g.y));
       // ceiling over interiors
       const ca0 = Math.max(g.from, g.sC !== null ? g.sC - FW : -Infinity); const cb0 = Math.min(g.to, g.eC !== null ? g.eC + FW : Infinity);
-      ranges(ca0, cb0, (a, b, st) => { const cm = SM[st].ceil; if (cm) piece(cm, g, a, b, 0, FW * 2 + 0.8, 0.2, 6.5 + g.y * 4); });
+      ranges(ca0, cb0, (a, b, st) => { const cm = smAt(st, a, b).ceil; if (cm) piece(cm, g, a, b, 0, FW * 2 + 0.8, 0.2, 6.5 + g.y * 4); });
       for (let q = 0; q < 2; q++) {
         const sg = q ? 1 : -1;
         const a = Math.max(g.from, g.sC !== null ? (sg === g.dS ? g.sC + HW : g.sC - HW - SW) : -Infinity);
         const b = Math.min(g.to, g.eC !== null ? ((sg === g.dE || sg === g.dE2) ? g.eC - HW : g.eC + HW + SW) : Infinity);
-        ranges(a, b, (a2, b2, st) => piece(SM[st].walk, g, a2, b2, sg * (HW + SW / 2), SW, 0.2, 0.1 + g.y));
+        ranges(a, b, (a2, b2, st) => piece(smAt(st, a2, b2).walk, g, a2, b2, sg * (HW + SW / 2), SW, 0.2, 0.1 + g.y));
         const cb = Math.min(g.to, g.eC !== null ? ((sg === g.dE || sg === g.dE2) ? g.eC - HW : g.eC + HW) : Infinity);
         const ca = Math.max(g.from, g.sC !== null ? (sg === g.dS ? g.sC + HW : g.sC - HW) : -Infinity);
         ranges(ca, cb, (a2, b2, st) => piece(SM[st].curb, g, a2, b2, sg * (HW + 0.12), 0.25, 0.24, 0.12 + g.y));
@@ -725,7 +758,7 @@ function createEngine(gl: ExpoWebGLRenderingContext, w: number, h: number) {
         const wa = Math.max(g.from, g.sC !== null ? (sg === g.dS ? g.sC + FW : g.sC - FW) : -Infinity);
         const wb = Math.min(g.to, g.eC !== null ? ((sg === g.dE || sg === g.dE2) ? g.eC - FW : g.eC + FW) : Infinity);
         ranges(wa, wb, (a2, b2, st) => {
-          const wm = SM[st].wall; const bm = SM[st].band; if (!wm || !bm) return;
+          const sm2 = smAt(st, a2, b2); const wm = sm2.wall; const bm = sm2.band; if (!wm || !bm) return;
           piece(wm, g, a2, b2, sg * (FW + 0.2), 0.4, 6.6, 3.3 + g.y);
           piece(bm, g, a2, b2, sg * (FW - 0.02), 0.06, 0.3, 1.1 + g.y);
         });
@@ -750,33 +783,53 @@ function createEngine(gl: ExpoWebGLRenderingContext, w: number, h: number) {
           at(g, n * BSP, sg * (HW + SW + bw / 2));
           b2.g.visible = true; b2.g.position.set(P.x, 0, P.z); b2.g.rotation.set(0, g.yaw + (sg < 0 ? 0 : Math.PI), 0);
         }
+        // open-air themes: guardrails + suspension cables, container stacks, fences with tents and bunkers
+        for (let n = Math.ceil(lo / BSP); n * BSP <= hi && sdi < sidePool.length; n++) {
+          const sl = n * BSP; const st = stAt(sl);
+          if ((st !== 'bridge' && st !== 'docks' && st !== 'military') || nearBoundary(sl, 4)) continue;
+          const seed = n * 31 + g.id * 977 + sg * 7; const geos = themes.sideGeos[st];
+          const m = sidePool[sdi++]; m.geometry = geos[Math.floor(hash(seed) * geos.length)];
+          at(g, sl, sg * (HW + SW)); m.visible = true; m.position.set(P.x, g.y, P.z); m.rotation.set(0, g.yaw + (sg < 0 ? 0 : Math.PI), 0);
+          const every = st === 'bridge' ? 8 : st === 'docks' ? 6 : 9;
+          if (n % every === 0 && ldi < landPool.length) {
+            const lm = landPool[ldi++]; lm.geometry = themes.landmarkGeos[st];
+            at(g, sl, sg * (HW + SW + (st === 'bridge' ? 0.5 : 0.2))); lm.visible = true; lm.position.set(P.x, g.y, P.z); lm.rotation.set(0, g.yaw + (sg < 0 ? 0 : Math.PI), 0);
+          }
+        }
         if (k === 0) continue;
         const clo = Math.max(g.from, g.sC !== null ? g.sC + HW + SW + 2 : -Infinity);
         const chi = Math.min(g.to, g.eC !== null ? g.eC - HW - SW - 2 : Infinity);
         const off = sg > 0 ? LSP / 2 : 0;
         for (let n = Math.ceil((clo - off) / LSP); n * LSP + off <= chi && li < lamps.length; n++) {
-          const sl = n * LSP + off; if (stAt(sl) !== 'city' || nearBoundary(sl, 6) || scenery.openAt(sl)) continue;
+          const sl = n * LSP + off; if (INDOOR[stAt(sl)] || nearBoundary(sl, 6) || scenery.openAt(sl)) continue;
           const lp = lamps[li++]; at(g, sl, sg * (HW + 0.7));
           lp.g.visible = true; lp.g.position.set(P.x, g.y, P.z); lp.g.rotation.set(0, g.yaw + (sg < 0 ? 0 : Math.PI), 0);
           const sd = n * 5 + g.id * 3 + sg; const dead = hash(sd) > 0.8; const flick = hash(sd + 9) > 0.6 && Math.sin(s.time * 23 + n * 3) > 0.6;
           lp.bulb.visible = !dead && !flick; lp.pool.visible = lp.bulb.visible;
+          lp.bulb.material = stAt(sl) === 'military' ? themes.glowMats.white : lampMat;
         }
         const coff = sg > 0 ? 13 : 0;
         for (let n = Math.ceil((clo - coff) / CSP); n * CSP + coff <= chi && ci2 < cars.length; n++) {
-          const sl = n * CSP + coff; if (stAt(sl) !== 'city' || nearBoundary(sl, 6) || scenery.openAt(sl)) continue;
+          const sl = n * CSP + coff; const cst = stAt(sl); if ((cst !== 'city' && cst !== 'bridge' && cst !== 'military') || nearBoundary(sl, 6) || scenery.openAt(sl)) continue;
+          if (cst === 'military') {
+            if (tki >= truckPool.length) continue;
+            const tk = truckPool[tki++]; const sdT = n * 11 + g.id * 5 + sg * 3; at(g, sl, sg * (HW + 2.4));
+            tk.visible = true; tk.position.set(P.x, g.y, P.z); tk.rotation.set(0, g.yaw + (hash(sdT) - 0.5) * 0.6 + (hash(sdT + 1) > 0.5 ? Math.PI : 0), 0);
+            continue;
+          }
           const cr = cars[ci2++]; const sd = n * 11 + g.id * 5 + sg * 3;
           at(g, sl, sg * (HW + 2.0 + hash(sd) * 0.8));
           cr.g.visible = true; cr.g.position.set(P.x, g.y, P.z);
           cr.g.rotation.set(0, g.yaw + (hash(sd + 1) - 0.5) * 0.9, sg * hash(sd + 2) * 0.12);
           cr.body.material = carMats[Math.floor(hash(sd + 3) * 3)];
-          cr.fire.f.visible = hash(sd + 4) > 0.7; if (cr.fire.f.visible) flicker(cr.fire, s.time, sd);
+          cr.fire.f.visible = hash(sd + 4) > (cst === 'bridge' ? 0.5 : 0.7); if (cr.fire.f.visible) flicker(cr.fire, s.time, sd);
         }
         // city clutter tucked against the building line
         const toff = sg > 0 ? 5 : 1;
         for (let n = Math.ceil((clo - toff) / 9); n * 9 + toff <= chi; n++) {
-          const sl = n * 9 + toff; if (stAt(sl) !== 'city' || nearBoundary(sl, 6) || scenery.openAt(sl)) continue;
+          const sl = n * 9 + toff; const cl2 = CLUTTER_BY[stAt(sl)]; if (!cl2 || nearBoundary(sl, 6) || scenery.openAt(sl)) continue;
           const sd = n * 17 + g.id * 7 + sg * 11; if (hash(sd) < 0.25) continue;
-          const kd = CLUTTER[Math.floor(hash(sd + 1) * CLUTTER.length)]; const pool = clutterPools[kd];
+          const kd = cl2[Math.floor(hash(sd + 1) * cl2.length)]; const pool = clutterPools[kd];
           if (clutterUse[kd] >= pool.length) continue;
           const it = pool[clutterUse[kd]++]; at(g, sl, sg * (HW + SW - 0.9));
           it.g.visible = true; it.g.position.set(P.x, 0.2 + g.y, P.z); it.g.rotation.set(0, g.yaw + hash(sd + 2) * 6, 0);
@@ -785,7 +838,17 @@ function createEngine(gl: ExpoWebGLRenderingContext, w: number, h: number) {
         // interior props along the walls (desks/lockers/barriers or beds/gurneys/bays)
         const poff = sg > 0 ? 4.5 : 0;
         for (let n = Math.ceil((clo - poff) / 9); n * 9 + poff <= chi; n++) {
-          const sl = n * 9 + poff; const st = stAt(sl); if (st === 'city' || nearBoundary(sl, 6)) continue;
+          const sl = n * 9 + poff; const st = stAt(sl); if (!INDOOR[st] || nearBoundary(sl, 6)) continue;
+          if (st === 'subway') {
+            const sewer = !s.campaign && sewerAt(sl); const sdS = n * 13 + sg * 5;
+            if (!sewer && sg > 0 && n % 7 === 0 && tri < trainPool.length) {
+              const tm = trainPool[tri++]; at(g, sl, sg * (HW + SW * 0.55)); tm.visible = true; tm.position.set(P.x, 0.2 + g.y, P.z); tm.rotation.set(0, g.yaw + Math.PI, 0); continue;
+            }
+            if (spi >= subPropPool.length || hash(sdS) < 0.2) continue;
+            const lst = sewer ? themes.sewerProps : themes.subwayProps; const pm = subPropPool[spi++]; pm.geometry = lst[Math.floor(hash(sdS + 1) * lst.length)];
+            at(g, sl, sg * (HW + SW * 0.62)); pm.visible = true; pm.position.set(P.x, 0.2 + g.y, P.z); pm.rotation.set(0, g.yaw + (sg < 0 ? 0 : Math.PI), 0);
+            continue;
+          }
           const sd = n * 13 + sg * 5; const list = PROPS[st]; const kind = list[Math.floor(hash(sd) * list.length)];
           const pool = propPools[kind]; const u = propUse[kind] ?? 0; if (u >= pool.length) continue; propUse[kind] = u + 1;
           const pg = pool[u]; at(g, sl, sg * (HW + SW * 0.62));
@@ -804,16 +867,17 @@ function createEngine(gl: ExpoWebGLRenderingContext, w: number, h: number) {
         scenery.dress(clo, chi, sg, putG);
         // wall signs + police strobes / hospital wall lights
         for (let n = Math.ceil((clo - (sg > 0 ? 18 : 0)) / 36); n * 36 + (sg > 0 ? 18 : 0) <= chi; n++) {
-          const sl = n * 36 + (sg > 0 ? 18 : 0); const st = stAt(sl); if (st === 'city' || nearBoundary(sl, 8)) continue;
-          const pool = signPools[st]; if (signUse[st] >= pool.length) continue;
+          const sl = n * 36 + (sg > 0 ? 18 : 0); const st = stAt(sl); if (st !== 'police' && st !== 'hospital' && st !== 'subway') continue;
+          if (nearBoundary(sl, 8) || (st === 'subway' && !s.campaign && sewerAt(sl))) continue;
+          const pool = st === 'subway' ? metroSigns : signPools[st]; if (signUse[st] >= pool.length) continue;
           const sgG = pool[signUse[st]++]; at(g, sl, sg * (FW - 0.04));
           sgG.visible = true; sgG.position.set(P.x, 4.0 + g.y, P.z); sgG.rotation.set(0, g.yaw - sg * Math.PI / 2, 0);
         }
         for (let n = Math.ceil(clo / 14); n * 14 <= chi && sb < strobes.length; n++) {
-          const sl = n * 14 + (sg > 0 ? 7 : 0); const st = stAt(sl); if (st === 'city' || sl > chi || nearBoundary(sl, 4)) continue;
+          const sl = n * 14 + (sg > 0 ? 7 : 0); const st = stAt(sl); if (!INDOOR[st] || sl > chi || nearBoundary(sl, 4)) continue;
           const m = strobes[sb++]; at(g, sl, sg * (FW - 0.06));
           m.visible = true; m.position.set(P.x, 5.2 + g.y, P.z); m.rotation.set(0, g.yaw, 0);
-          m.material = st === 'police' ? (((n + Math.floor(s.time * 3)) & 1) ? copRed : copBlue) : (n & 1 ? exitGreen : crossRed);
+          m.material = st === 'police' ? (((n + Math.floor(s.time * 3)) & 1) ? copRed : copBlue) : st === 'subway' ? (Math.sin(s.time * 5 + n) > 0 ? copRed : darkSteel) : (n & 1 ? exitGreen : crossRed);
         }
       }
       // ceiling light panels down the corridor centre
@@ -821,8 +885,9 @@ function createEngine(gl: ExpoWebGLRenderingContext, w: number, h: number) {
         const la = Math.max(g.from, g.sC !== null ? g.sC - HW : -Infinity); const lb = Math.min(g.to, g.eC !== null ? g.eC + HW : Infinity);
         scenery.overhead(la, lb, (sl2, lat) => { at(g, sl2, lat); Q.x = P.x; Q.z = P.z; Q.y = g.y; Q.yaw = g.yaw; return Q; });
         for (let n = Math.ceil(la / 8); n * 8 <= lb && cl < ceilLights.length; n++) {
-          if (stAt(n * 8) === 'city' || nearBoundary(n * 8, 2)) continue;
+          const lst2 = stAt(n * 8); if (!INDOOR[lst2] || nearBoundary(n * 8, 2)) continue;
           const m = ceilLights[cl++]; at(g, n * 8, 0);
+          m.material = lst2 === 'subway' ? (!s.campaign && sewerAt(n * 8) ? themes.glowMats.amber : (n % 3 === 0 ? themes.glowMats.red : lightPanel)) : lightPanel;
           // a few failing tubes stutter in the hospital and precinct
           m.visible = !(hash(n * 7 + 3) > 0.8 && Math.sin(s.time * (19 + (n % 4) * 3) + n) > 0.15);
           m.position.set(P.x, 6.36 + g.y * 4, P.z); m.rotation.set(0, g.yaw, 0);
@@ -839,11 +904,17 @@ function createEngine(gl: ExpoWebGLRenderingContext, w: number, h: number) {
     for (const k of ['alley', 'collapsed'] as const) { const pool = routePools[k]; for (let i = routeUse[k]; i < pool.length; i++) pool[i].visible = false; }
     for (const k in propPools) { const pool = propPools[k]; for (let i = propUse[k] ?? 0; i < pool.length; i++) pool[i].visible = false; }
     for (const st of ['police', 'hospital'] as const) { const pool = signPools[st]; for (let i = signUse[st]; i < pool.length; i++) pool[i].visible = false; }
+    for (let i = signUse.subway; i < metroSigns.length; i++) metroSigns[i].visible = false;
+    for (let i = sdi; i < sidePool.length; i++) sidePool[i].visible = false;
+    for (let i = ldi; i < landPool.length; i++) landPool[i].visible = false;
+    for (let i = tri; i < trainPool.length; i++) trainPool[i].visible = false;
+    for (let i = spi; i < subPropPool.length; i++) subPropPool[i].visible = false;
+    for (let i = tki; i < truckPool.length; i++) truckPool[i].visible = false;
     // stage entrance portal (nearest boundary ahead, or just behind)
     let B = Math.ceil((d - 12) / STAGE_LEN) * STAGE_LEN;
     if (bounds) { B = -1; for (const x of bounds) if (x >= d - 12) { B = x; break; } }
     const bst = stAt(B);
-    for (const st of ['city', 'police', 'hospital'] as const) {
+    for (const st of STAGES) {
       const pg = portals[st];
       if (st !== bst || B <= 0 || B - d > VIS + 20 || Math.abs(B - J.s) < 16 || (L && Math.abs(B - L.s) < 16)) { pg.visible = false; continue; }
       const sg = segOf(B); at(sg, B, 0);
@@ -855,13 +926,17 @@ function createEngine(gl: ExpoWebGLRenderingContext, w: number, h: number) {
     const prevSt = stAt(d - into - 1);
     fogNow.copy(FOG[prevSt]).lerp(FOG[curSt], Math.min(1, into / 30));
     const md = scenery.mood(fogNow); fogNow.copy(md.fog);
-    hemiL.intensity = 1.25 * md.light; sunL.intensity = 1.6 * md.light; rim.intensity = 0.35 * Math.max(0.6, md.light);
+    // Last Stand night: from the second loop of the seven themes the world sinks into a red-black night
+    const night = !s.campaign && stageLoop(d) >= 1 ? 1 : 0; const lightK = md.light * (night ? 0.68 : 1) * (curSt === 'subway' ? 0.6 : 1);
+    if (night) fogNow.multiplyScalar(0.55).lerp(NIGHT, 0.2);
+    hemiL.intensity = 1.25 * lightK; sunL.intensity = 1.6 * lightK; rim.intensity = 0.35 * Math.max(0.6, lightK);
+    water.visible = curSt === 'bridge';
     (scn.fog as THREE.Fog).color.copy(fogNow); renderer.setClearColor(fogNow);
     // asphalt cracks on city streets only
     const crA = Math.max(d - 10, L ? L.s + HW : -Infinity); const crB = Math.min(d + 80, J.s - HW);
     for (let i = 0; i < cracks.length; i++) {
       const sl = Math.ceil(crA / 9) * 9 + i * 9; const cm = cracks[i];
-      if (sl > crB || stAt(sl) !== 'city') { cm.visible = false; continue; }
+      if (sl > crB || (stAt(sl) !== 'city' && stAt(sl) !== 'bridge')) { cm.visible = false; continue; }
       const sd = Math.round(sl / 9) * 7;
       cm.visible = true; cm.position.set((hash(sd) - 0.5) * LW * 2.6, 0.012, -(sl - d));
       cm.rotation.set(-Math.PI / 2, 0, hash(sd + 3) * 3); cm.scale.set(0.4 + hash(sd + 1) * 1.2, 0.15 + hash(sd + 2) * 0.6, 1);
@@ -870,7 +945,7 @@ function createEngine(gl: ExpoWebGLRenderingContext, w: number, h: number) {
     {
       const dA = Math.max(d - 6, L ? L.s + HW : -Infinity); const dB = Math.min(d + 60, J.s - HW - 2); let di = 0;
       for (let sl = Math.ceil(dA / 8) * 8; sl <= dB && di < dashes.length - 1; sl += 8) {
-        if (stAt(sl) !== 'city') continue;
+        if (stAt(sl) !== 'city' && stAt(sl) !== 'bridge') continue;
         for (const x of [-LW / 2, LW / 2]) { const m = dashes[di++]; m.visible = true; m.position.set(x, 0.011, -(sl - d)); }
       }
       for (let i = di; i < dashes.length; i++) dashes[i].visible = false;
@@ -989,8 +1064,16 @@ function createEngine(gl: ExpoWebGLRenderingContext, w: number, h: number) {
 
     // incoming walkers: straight down their lane toward the runner, facing the camera
     for (const pool of walkerPools) for (const w of pool) w.used = false;
+    let rti = 0;
     for (const wk of s.walkers) {
       const z = wk.s - d; if (z > VIS + 30 || z < -8) continue;
+      if (wk.type === 'rat') {
+        if (rti >= ratPool.length) continue;
+        const rt = ratPool[rti++]; const gR = segOf(wk.s); at(gR, wk.s, wk.lane * LW);
+        rt.g.visible = true; rt.g.position.set(P.x, gR.y, P.z); rt.g.rotation.y = gR.yaw + Math.PI; rt.g.scale.setScalar(1.25);
+        animateRat(rt, s.time + wk.id * 0.37);
+        continue;
+      }
       const pool = walkerPools[wk.kind]; if (!pool) continue;
       let slot = null; for (const w of pool) if (!w.used) { slot = w; break; }
       if (!slot) continue;
@@ -1011,6 +1094,7 @@ function createEngine(gl: ExpoWebGLRenderingContext, w: number, h: number) {
       slot.sh.visible = true; slot.sh.position.set(P.x, 0.02 + g.y, P.z); slot.sh.scale.setScalar(size);
     }
     for (const pool of walkerPools) for (const w of pool) if (!w.used) { w.r.root.visible = false; w.sh.visible = false; }
+    for (let i = rti; i < ratPool.length; i++) ratPool[i].g.visible = false;
 
     // camera
     const shake = s.shake > 0 ? Math.sin(s.time * 80) * s.shake * 0.25 : 0;

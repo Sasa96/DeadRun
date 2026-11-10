@@ -7,14 +7,30 @@ export interface Pop { id: number; lane: number; h: number; age: number }
 export type Mode = 'home' | 'run' | 'paused' | 'dying' | 'over' | 'complete';
 export type TurnDir = -1 | 1;
 export type DeathCause = ObstacleType | 'corner' | 'wrongway' | 'walker';
-/** Themed stages cycle by path distance: city -> police -> hospital -> city ... */
-export type StageId = 'city' | 'police' | 'hospital';
-export const STAGES: StageId[] = ['city', 'police', 'hospital'];
-export const STAGE_NAMES: Record<StageId, string> = { city: 'Ruined City', police: 'Precinct 9 Police Station', hospital: 'St. Agnes Hospital' };
-/** metres per stage (~60s at mid speed) */
-export const STAGE_LEN = 900;
+/**
+ * Themed stages cycle by path distance in Last Stand, 1 km each:
+ * city -> police -> hospital -> subway & sewers -> highway bridge -> docks -> military quarantine zone -> (night) city ...
+ * Campaign missions only ever use the first three.
+ */
+export type StageId = 'city' | 'police' | 'hospital' | 'subway' | 'bridge' | 'docks' | 'military';
+export const STAGES: StageId[] = ['city', 'police', 'hospital', 'subway', 'bridge', 'docks', 'military'];
+export const STAGE_NAMES: Record<StageId, string> = {
+  city: 'Ruined City', police: 'Precinct 9 Police Station', hospital: 'St. Agnes Hospital',
+  subway: 'The Underground', bridge: 'Harbor Bridge', docks: 'Port Docks & Fuel Depot', military: 'Quarantine Zone',
+};
+/** stages that are enclosed corridors (walls + ceiling) rather than open streets */
+export const INDOOR: Record<StageId, boolean> = { city: false, police: true, hospital: true, subway: true, bridge: false, docks: false, military: false };
+/** metres per stage */
+export const STAGE_LEN = 1000;
 /** character kinds (index into characters.ts ZOMBIES) used for incoming walkers per stage */
-export const STAGE_KINDS: Record<StageId, number[]> = { city: [0, 1, 3, 4], police: [5, 6], hospital: [7, 8, 2] };
+export const STAGE_KINDS: Record<StageId, number[]> = {
+  city: [0, 1, 3, 4], police: [5, 6], hospital: [7, 8, 2],
+  subway: [9, 10, 0], bridge: [11, 4, 3], docks: [12, 13], military: [14, 15],
+};
+/** the second half of each subway stretch drops into the sewers, where rat swarms run (Last Stand only) */
+export function sewerAt(dist: number) { return stageAt(dist) === 'subway' && ((dist % STAGE_LEN) + STAGE_LEN) % STAGE_LEN >= STAGE_LEN / 2; }
+/** completed loops of all seven stages; from the second loop the world turns to night */
+export function stageLoop(dist: number) { return Math.floor(Math.max(0, dist) / (STAGE_LEN * STAGES.length)); }
 /** max simultaneously alive walkers of one kind (render pool size per kind) and in total */
 export const WALKER_PER_KIND = 3;
 export const WALKER_MAX = 6;
@@ -29,12 +45,16 @@ export const WALKER_HALF_D = 0.45;
  * brute — huge, stands between two lanes and blocks both; find the third.
  * crawler — low on the ground; jump over it (sidestep works too, sliding does not).
  */
-export type WalkerType = 'walker' | 'sprinter' | 'brute' | 'crawler';
+export type WalkerType = 'walker' | 'sprinter' | 'brute' | 'crawler' | 'rat';
 /** extra lateral reach of a brute: centred on a lane boundary, it covers both neighbouring lanes */
 export const BRUTE_HALF_W = WALKER_HALF_W + 0.5;
 /** a crawler is long and low: deeper hitbox, cleared by any jump above this height */
 export const CRAWLER_HALF_D = 0.6;
 export const CRAWLER_CLEAR = 0.5;
+/** rat swarm: a tight pack running down one lane in the sewers; small hitbox, cleared by any real jump */
+export const RAT_HALF_W = 0.3;
+export const RAT_HALF_D = 0.3;
+export const RAT_CLEAR = 0.42;
 /** An infected walking straight toward the runner along its fixed lane. `s` decreases at `v` m/s. */
 export interface Walker { id: number; s: number; lane: number; v: number; kind: number; type: WalkerType }
 /** Special infected introduced one per mission: crawlers in 2, sprinters in 3, brutes from 4. Mission 1 keeps plain walkers. */
@@ -51,22 +71,24 @@ export const LAST_STAND_SPECIALS: [WalkerType, number][] = [['crawler', 800], ['
 export function lastStandTypes(at: number): WalkerType[] { return LAST_STAND_SPECIALS.filter(([, from]) => at >= from).map(([t]) => t); }
 export function lastStandChance(at: number) { return at < 800 ? 0 : Math.min(0.5, 0.25 + (at - 800) / 12800); }
 
-export function stageAt(dist: number): StageId { return STAGES[((Math.floor(Math.max(0, dist) / STAGE_LEN) % 3) + 3) % 3]; }
+export function stageAt(dist: number): StageId { return STAGES[Math.floor(Math.max(0, dist) / STAGE_LEN) % STAGES.length]; }
 export interface StageInfo { id: StageId; name: string; cycle: number; progress: number; remaining: number; next: StageId }
 export function stageInfo(dist: number): StageInfo {
-  const d = Math.max(0, dist); const n = Math.floor(d / STAGE_LEN); const id = STAGES[n % 3];
-  return { id, name: STAGE_NAMES[id], cycle: Math.floor(n / 3), progress: (d - n * STAGE_LEN) / STAGE_LEN, remaining: (n + 1) * STAGE_LEN - d, next: STAGES[(n + 1) % 3] };
+  const d = Math.max(0, dist); const n = Math.floor(d / STAGE_LEN); const N = STAGES.length; const id = STAGES[n % N];
+  return { id, name: STAGE_NAMES[id], cycle: Math.floor(n / N), progress: (d - n * STAGE_LEN) / STAGE_LEN, remaining: (n + 1) * STAGE_LEN - d, next: STAGES[(n + 1) % N] };
 }
 /** Visual theme for an obstacle, from its absolute path distance (not the runner's stage) so boundaries never flicker.
  * variant (0|1) picks between two same-rule models for hurdles. Pure; never affects collision. */
 export function obstacleVisual(s: number, id: number, type: ObstacleType): { stage: StageId; variant: 0 | 1 } {
   return { stage: stageAt(s), variant: type === 'hurdle' ? ((id & 1) as 0 | 1) : 0 };
 }
-/** Allocation-free render pool index: city gap/hurdle/beam 0-2 | police gap,hurdleA,hurdleB,beam 3-6 | hospital 7-10. */
+/** Allocation-free render pool index: city gap/hurdle/beam 0-2, then gap,hurdleA,hurdleB,beam per themed stage:
+ * police 3-6 | hospital 7-10 | subway 11-14 | bridge 15-18 | docks 19-22 | military 23-26. */
+export const OB_POOL_COUNT = 27;
 export function obstaclePoolIndex(s: number, id: number, type: ObstacleType): number {
   const st = stageAt(s);
   if (st === 'city') return type === 'gap' ? 0 : type === 'hurdle' ? 1 : 2;
-  const b = st === 'police' ? 3 : 7;
+  const b = 3 + (STAGES.indexOf(st) - 1) * 4;
   return type === 'gap' ? b : type === 'beam' ? b + 3 : b + 1 + (id & 1);
 }
 /** A 90-degree corner at path distance `s`. dir -1 = left, 1 = right. */
@@ -325,7 +347,7 @@ export function simStageAt(s: Sim, dist: number): StageId {
 }
 export function simObstaclePoolIndex(s: Sim, dist: number, id: number, type: ObstacleType) {
   const stage = simStageAt(s, dist);
-  return obstaclePoolIndex(stage === 'city' ? 0 : stage === 'police' ? STAGE_LEN : STAGE_LEN * 2, id, type);
+  return obstaclePoolIndex(STAGES.indexOf(stage) * STAGE_LEN, id, type);
 }
 
 function baseSim(mode: Mode): Sim {
@@ -364,7 +386,19 @@ export const actions = {
 function rand(a: number, b: number) { return a + Math.random() * (b - a); }
 
 /** Walker row: walkers start ahead so they meet the runner near `at`; at least one lane stays free and no obstacle shares the row. */
+/** Sewer rat swarm: 4-6 rats packed nose to tail in one lane, racing at the runner (Last Stand sewers only). */
+function spawnRats(s: Sim, at: number) {
+  if (s.walkers.length > WALKER_MAX - 4) return false;
+  const J = s.turn.s; const lane = [-1, 0, 1][Math.floor(Math.random() * 3)];
+  const v = rand(6, 8.5); const n = 4 + Math.floor(Math.random() * 3);
+  const s0 = at + v * Math.max(0, at - s.dist) / Math.max(1, s.speed);
+  if (at < J && s0 + n + 2 > J - clearBefore(s.speed)) return false;
+  if ((s0 - s.dist) / (s.speed + v) < 1.4) return false;
+  for (let i = 0; i < n; i++) s.walkers.push({ id: s.uid++, s: s0 + i * 0.55, lane: lane + (Math.random() - 0.5) * 0.25, v, kind: 0, type: 'rat' });
+  return true;
+}
 function spawnWalkers(s: Sim, at: number) {
+  if (!s.campaign && sewerAt(at) && Math.random() < 0.45) return spawnRats(s, at);
   const kinds = STAGE_KINDS[simStageAt(s, at)];
   if (s.walkers.length >= WALKER_MAX) return false;
   const df = simDifficulty(s, at);
@@ -377,7 +411,7 @@ function spawnWalkers(s: Sim, at: number) {
   const J = s.turn.s;
   const made: Walker[] = [];
   for (const lane of lanes) {
-    const avail = kinds.filter((k) => s.walkers.filter((w) => w.kind === k).length + made.filter((w) => w.kind === k).length < WALKER_PER_KIND);
+    const avail = kinds.filter((k) => s.walkers.filter((w) => w.kind === k && w.type !== 'rat').length + made.filter((w) => w.kind === k).length < WALKER_PER_KIND);
     if (!avail.length) break;
     // Only the first of a pair is special, so a row never holds two surprises.
     const type: WalkerType = made.length === 0 && special ? special : 'walker';
@@ -583,9 +617,10 @@ export function step(s: Sim, dt: number): { coin: boolean; died: boolean; turned
 
   for (const w of s.walkers) {
     w.s -= w.v * dt;
-    if (Math.abs(w.lane - s.px) > (w.type === 'brute' ? BRUTE_HALF_W : WALKER_HALF_W)) continue;
-    if (Math.abs(w.s - s.dist) > (w.type === 'crawler' ? CRAWLER_HALF_D : WALKER_HALF_D)) continue;
+    if (Math.abs(w.lane - s.px) > (w.type === 'brute' ? BRUTE_HALF_W : w.type === 'rat' ? RAT_HALF_W : WALKER_HALF_W)) continue;
+    if (Math.abs(w.s - s.dist) > (w.type === 'crawler' ? CRAWLER_HALF_D : w.type === 'rat' ? RAT_HALF_D : WALKER_HALF_D)) continue;
     if (w.type === 'crawler' && s.jy >= CRAWLER_CLEAR) continue;
+    if (w.type === 'rat' && s.jy >= RAT_CLEAR) continue;
     if (s.invulnerableT > 0) continue;
     if (absorbHit(s)) { out.stumbled = true; continue; }
     die(s, 'walker', 0.6); s.deathKind = w.kind; s.deathWalker = w.type;

@@ -70,13 +70,15 @@ const SPECIAL_WARN: Record<Exclude<WalkerType, 'walker'>, string> = {
   crawler: 'Crawler ahead. It is low on the ground: jump over it.',
   sprinter: 'Sprinter! It charges fast. Change lanes early.',
   brute: 'Brute ahead. It blocks two lanes. Find the open one.',
+  rat: 'Rat swarm! They are low and fast: jump over them or switch lanes.',
 };
 const SPECIAL_CAUSE: Record<Exclude<WalkerType, 'walker'>, string> = {
   crawler: 'A crawler grabbed your ankles. Jump over the ones on the ground.',
   sprinter: 'A sprinter ran you down. Move lanes as soon as you see one charging.',
   brute: 'A brute flattened you. It fills two lanes, so head for the third.',
+  rat: 'The rat swarm dragged you down. Jump the pack or get out of its lane.',
 };
-const STAGE_ICON: Record<StageId, React.ComponentProps<typeof MaterialCommunityIcons>['name']> = { city: 'city-variant-outline', police: 'police-badge-outline', hospital: 'hospital-box-outline' };
+const STAGE_ICON: Record<StageId, React.ComponentProps<typeof MaterialCommunityIcons>['name']> = { city: 'city-variant-outline', police: 'police-badge-outline', hospital: 'hospital-box-outline', subway: 'subway-variant', bridge: 'bridge', docks: 'anchor', military: 'biohazard' };
 const TONE_COLOR: Record<IntroCaption['tone'], string> = { time: T.mutedForeground, sfx: T.foreground, alert: T.destructive, action: T.primary };
 
 export default function Game() {
@@ -803,6 +805,7 @@ export default function Game() {
               <HelpRow icon="corner-up-right" title="Turn at corners" body="Streets end in dead ends. Arrows, roadside signs and a countdown show which way the open street goes. Swipe that way, tap the turn button, or press the arrow key as you reach the corner. The faster you run, the earlier it accepts your turn. Tilt never turns you; it only moves you across the street." />
               <HelpRow icon="users" title="Infected walk at you" body="Some infected come straight down a lane toward you. They never swerve. You cannot jump or slide past them, so move to an empty lane. There is always one open." />
               <HelpRow icon="alert-octagon" title="Special infected" body="From mission 2 the campaign adds new infected, one per mission. Crawlers stay low: jump over them. Sprinters charge fast: change lanes early. Brutes block two lanes at once: find the third." />
+              <HelpRow icon="layers" title="Last Stand zones" body="Every kilometre the route changes: city streets, Precinct 9, St. Agnes Hospital, the Underground, Harbor Bridge, the port docks and the military quarantine zone. Then night falls and it all starts again, darker. In the sewers under the subway, rat swarms race down a lane: jump them or dodge." />
               <HelpRow icon="map" title="Three zones, then repeat" body="Every 900 m the route changes: ruined city streets, then the Precinct 9 police station, then St. Agnes Hospital, then back outside. Uniformed officers patrol the precinct; doctors and nurses roam the wards. Your distance and speed carry through." />
               <HelpRow icon="arrow-up" title="Swipe up or tap Jump" body="Clear sinkholes and concrete barricades." />
               <HelpRow icon="arrow-down" title="Swipe down or tap Slide" body="Duck under quarantine gates. Mid-air, it drops you fast." />

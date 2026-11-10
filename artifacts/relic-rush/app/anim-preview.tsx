@@ -7,7 +7,7 @@ import { Platform, View } from 'react-native';
 import { GLView, type ExpoWebGLRenderingContext } from 'expo-gl';
 import * as THREE from 'three';
 import { scene as C } from '@/constants/colors';
-import { animateSurvivor, buildSurvivor } from '@/components/characters';
+import { animateSurvivor, animateZombie, buildSurvivor, buildZombie } from '@/components/characters';
 import { newSim, type Sim } from '@/lib/game';
 
 function param(name: string, def: string) {
@@ -30,6 +30,18 @@ export default function AnimPreview() {
     const grid = new THREE.GridHelper(40, 80, 0x77707a, 0x4a4650); grid.position.y = 0.002; scn.add(grid);
     const mat = new THREE.MeshLambertMaterial({ vertexColors: true });
     const { rig } = buildSurvivor(mat, 'scout'); scn.add(rig.root);
+    // ?zoo=9,15 : line-up of zombie kinds 9..15, shambling, seen from the front three-quarter
+    const zoo = param('zoo', '');
+    if (zoo) {
+      rig.root.visible = false; grid.visible = false;
+      const [a, b] = zoo.split(',').map(Number); const n = b - a + 1;
+      const zs = Array.from({ length: n }, (_, i) => { const z = buildZombie(a + i, mat); z.rig.root.position.x = (i - (n - 1) / 2) * 1.0; z.rig.root.rotation.y = Math.PI; scn.add(z.rig.root); return z; });
+      const W0 = gl.drawingBufferWidth; const H0 = gl.drawingBufferHeight;
+      const cam = new THREE.PerspectiveCamera(30, W0 / H0, 0.1, 100); cam.position.set(1.2, 1.5, n * 1.25 + 1); cam.lookAt(0, 1.0, 0);
+      renderer.setScissorTest(false);
+      const loop = () => { const t = performance.now() / 1000; zs.forEach((z, i) => animateZombie(z.rig, z.gait, t * 4 + i, 0.2)); renderer.render(scn, cam); gl.endFrameEXP(); requestAnimationFrame(loop); };
+      loop(); return;
+    }
     const strip = Number(param('strip', '0'));
     if (strip > 0) {
       rig.root.visible = false;
